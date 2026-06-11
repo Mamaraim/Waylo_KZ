@@ -206,7 +206,7 @@ async function renderReqDetail(active, reqId) {
   }
   box.innerHTML = `
     <div class="card">
-      <div class="card-head">Блоки услуг <span id="addLineSlot"></span></div>
+      <div class="card-head">Блоки услуг <span id="addLineSlot"></span>${(lines||[]).length ? ` <button class="btn btn--ghost btn--sm" id="voucherBtn">Ваучер</button>` : ''}</div>
       <div id="lineMsg"></div>
       ${(lines||[]).length ? `<table><thead><tr><th>Тип</th><th>Ресурс</th><th>Период</th><th>Кол-во</th><th>Цена</th><th>Подтв.</th><th>Холд</th><th></th></tr></thead><tbody>
         ${lines.map(l => { const hs = holdsBy[l.id]||[]; const act = hs.filter(h => ['held','confirmed'].includes(h.status)); return `<tr><td>${typeBadge(l.type)}</td><td class="id-cell">${short(l.resource_id)}</td><td class="hint">${esc(l.from_date)} — ${esc(l.to_date)}</td><td class="mono">${l.quantity}</td><td class="price">${money(l.sell_price)}</td><td>${badge(l.confirmation)}</td><td>${act.length?badge(act[0].status):'<span class="hint">нет</span>'}</td><td style="text-align:right">${!act.length?`<button class="btn btn--ghost btn--sm holdBtn" data-id="${l.id}">Захолдить</button>`:''}</td></tr>`; }).join('')}
@@ -218,6 +218,7 @@ async function renderReqDetail(active, reqId) {
     if (error) $('#lineMsg').innerHTML = `<div class="notice notice--err" style="margin:10px 14px">${esc(error.message)}</div>`;
     else renderReqDetail(active, reqId);
   });
+  const vb = $('#voucherBtn'); if (vb) vb.onclick = () => renderVoucher(reqId, lines);
   renderAddLine(reqId, () => renderReqDetail(active, reqId));
 }
 
@@ -270,6 +271,77 @@ function lineForm(type, opts, reqId, onAdded) {
     if (error) { form.innerHTML = `<div class="notice notice--err" style="margin:10px 14px">${esc(error.message)}</div>`; return; }
     onAdded();
   };
+}
+
+/* ── Ваучер (печатный документ по заявке) ────────────────────────────────── */
+async function renderVoucher(reqId, lines) {
+  const hotelIds = [...new Set(lines.filter(l => l.type === 'HOTEL').map(l => l.resource_id))];
+  const transIds = [...new Set(lines.filter(l => l.type === 'TRANSPORT').map(l => l.resource_id))];
+  const [{ data: req }, { data: rts }, { data: vcs }, { data: orgs }] = await Promise.all([
+    db.from('request').select('id,travel_date,pax_count,dmc_org_id,status').eq('id', reqId).single(),
+    hotelIds.length ? db.from('room_type').select('id,name,property_id').in('id', hotelIds) : Promise.resolve({ data: [] }),
+    transIds.length ? db.from('vehicle_class').select('id,name').in('id', transIds) : Promise.resolve({ data: [] }),
+    db.from('organization').select('id,name,country'),
+  ]);
+  const propIds = [...new Set((rts || []).map(r => r.property_id))];
+  const { data: props } = propIds.length ? await db.from('property').select('id,name,city').in('id', propIds) : { data: [] };
+  const orgName = Object.fromEntries((orgs || []).map(o => [o.id, o.name]));
+  const propById = Object.fromEntries((props || []).map(p => [p.id, p]));
+  const rtById = Object.fromEntries((rts || []).map(r => [r.id, r]));
+  const vcById = Object.fromEntries((vcs || []).map(v => [v.id, v]));
+  const resName = (l) => {
+    if (l.type === 'HOTEL') { const rt = rtById[l.resource_id]; const p = rt && propById[rt.property_id]; return p ? `${p.name} · ${rt.name} (${p.city})` : 'Размещение'; }
+    const v = vcById[l.resource_id]; return v ? `Трансфер · ${v.name}` : 'Трансфер';
+  };
+  const nights = (l) => Math.max(1, Math.round((new Date(l.to_date) - new Date(l.from_date)) / 86400000));
+  const lineTotal = (l) => Number(l.sell_price || 0) * l.quantity * nights(l);
+  const grand = lines.reduce((s, l) => s + lineTotal(l), 0);
+  const today = new Date().toLocaleDateString('ru-RU');
+
+  const ov = document.createElement('div');
+  ov.id = 'voucherOverlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(20,30,40,.5);display:flex;align-items:flex-start;justify-content:center;overflow:auto;z-index:1000;padding:32px';
+  ov.innerHTML = `
+    <style>@media print{body>*:not(#voucherOverlay){display:none!important}#voucherOverlay{position:static!important;background:#fff!important;padding:0!important;display:block!important}#voucherOverlay .vchr-actions{display:none!important}#voucherOverlay .vchr-doc{box-shadow:none!important;width:100%!important;max-width:none!important}}</style>
+    <div class="vchr-doc" style="background:#fff;width:760px;max-width:100%;border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.3);font-family:system-ui,'Segoe UI',sans-serif;color:#1a2530">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;padding:32px 36px 20px;border-bottom:2px solid #0a7d6c">
+        <div><div style="font-size:22px;font-weight:700;color:#0a7d6c">Waylo <span style="color:#1a2530">KZ</span></div><div style="font-size:12px;color:#6b7a89;margin-top:2px">Операционный коридор · Узбекистан</div></div>
+        <div style="text-align:right"><div style="font-size:20px;font-weight:700;letter-spacing:1px">ВАУЧЕР</div><div style="font-size:12px;color:#6b7a89">VOUCHER</div></div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:18px;justify-content:space-between;padding:20px 36px;font-size:13px">
+        <div><div style="color:#6b7a89">Ваучер №</div><div style="font-weight:600;font-family:monospace">${short(reqId)}</div></div>
+        <div><div style="color:#6b7a89">Дата выпуска</div><div style="font-weight:600">${today}</div></div>
+        <div><div style="color:#6b7a89">Турагентство (DMC)</div><div style="font-weight:600">${esc(orgName[req?.dmc_org_id] || '—')}</div></div>
+        <div><div style="color:#6b7a89">Дата поездки</div><div style="font-weight:600">${esc(req?.travel_date || '—')}</div></div>
+        <div><div style="color:#6b7a89">Туристов</div><div style="font-weight:600">${req?.pax_count ?? '—'}</div></div>
+      </div>
+      <div style="padding:0 36px 8px"><table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="text-align:left;color:#6b7a89;border-bottom:1px solid #e3e9ee">
+          <th style="padding:8px 6px">Услуга</th><th style="padding:8px 6px">Поставщик</th><th style="padding:8px 6px">Период</th><th style="padding:8px 6px;text-align:center">Кол-во</th><th style="padding:8px 6px;text-align:center">Статус</th><th style="padding:8px 6px;text-align:right">Сумма</th>
+        </tr></thead><tbody>
+        ${lines.map(l => `<tr style="border-bottom:1px solid #f0f3f6">
+          <td style="padding:9px 6px">${esc(resName(l))}</td>
+          <td style="padding:9px 6px">${esc(orgName[l.supplier_org_id] || '—')}</td>
+          <td style="padding:9px 6px;color:#6b7a89">${esc(l.from_date)} → ${esc(l.to_date)}</td>
+          <td style="padding:9px 6px;text-align:center">${l.quantity}</td>
+          <td style="padding:9px 6px;text-align:center">${l.confirmation==='confirmed'?'<span style="color:#0a7d6c">подтверждено</span>':'<span style="color:#b07a00">ожидает</span>'}</td>
+          <td style="padding:9px 6px;text-align:right;font-weight:600">${money(lineTotal(l))}</td>
+        </tr>`).join('')}
+        </tbody><tfoot><tr><td colspan="5" style="padding:12px 6px;text-align:right;font-weight:600">Итого:</td><td style="padding:12px 6px;text-align:right;font-weight:700;font-size:15px;color:#0a7d6c">${money(grand)}</td></tr></tfoot>
+      </table></div>
+      <div style="padding:16px 36px 28px;font-size:11px;color:#8a97a4;line-height:1.5;border-top:1px solid #e3e9ee;margin-top:8px">
+        Документ сформирован платформой Waylo на основе условий заявки. Ваучер служит подтверждением бронирования услуг у поставщиков Узбекистана. Цены указаны к продаже для DMC.
+      </div>
+      <div class="vchr-actions" style="display:flex;gap:10px;justify-content:flex-end;padding:0 36px 28px">
+        <button id="vchrClose" style="padding:9px 18px;border:1px solid #cdd6de;background:#fff;border-radius:8px;cursor:pointer;font:inherit">Закрыть</button>
+        <button id="vchrPrint" style="padding:9px 18px;border:0;background:#0a7d6c;color:#fff;border-radius:8px;cursor:pointer;font:inherit">Печать / Сохранить PDF</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+  ov.querySelector('#vchrClose').onclick = close;
+  ov.querySelector('#vchrPrint').onclick = () => window.print();
 }
 
 /* ── HOTEL ───────────────────────────────────────────────────────────────── */
