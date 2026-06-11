@@ -83,6 +83,7 @@ input:focus,select:focus{outline:2px solid var(--accent-soft);border-color:var(-
    =========================================================================== */
 const SUPABASE_URL = "https://rfxenahasipffiuommvx.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJmeGVuYWhhc2lwZmZpdW9tbXZ4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODExNDE3NTEsImV4cCI6MjA5NjcxNzc1MX0.4inQoQjNxBmpn_zsuJj6cdW283-kzTGB-TCj14G1KYw";
+
 const app = document.getElementById('app');
 
 if (!SUPABASE_ANON_KEY || SUPABASE_ANON_KEY.startsWith("ВСТАВЬ")) {
@@ -414,11 +415,64 @@ async function hotelFinance(active) {
 
 /* ── TRANSPORT ───────────────────────────────────────────────────────────── */
 async function renderTransport(active) {
-  if (!state.tab) state.tab = 'confirm';
-  navShell('Трансфер · ' + active.orgName, [{ id:'confirm', label:'Подтверждения' }, { id:'avail', label:'Доступность' }, { id:'finance', label:'Финансы' }]);
-  if (state.tab === 'confirm') supplierConfirm(active, 'трансфер');
+  if (!state.tab) state.tab = 'fleet';
+  navShell('Трансфер · ' + active.orgName, [{ id:'fleet', label:'Автопарк' }, { id:'avail', label:'Доступность' }, { id:'confirm', label:'Подтверждения' }, { id:'finance', label:'Финансы' }]);
+  if (state.tab === 'fleet') transportFleet(active);
   else if (state.tab === 'avail') transportAvail(active);
+  else if (state.tab === 'confirm') supplierConfirm(active, 'трансфер');
   else hotelFinance(active);
+}
+
+// Стандартная линейка классов (pax → тип машины)
+const FLEET_TIERS = [
+  { name:'Седан',                     pax_min:1,  pax_max:2  },
+  { name:'Минивэн (Hyundai Staria)',  pax_min:3,  pax_max:4  },
+  { name:'Вэн (Toyota Hiace)',        pax_min:5,  pax_max:8  },
+  { name:'Мидибас 18 мест (Sprinter)',pax_min:9,  pax_max:12 },
+  { name:'Автобус 30–50 мест',        pax_min:13, pax_max:50 },
+];
+
+async function transportFleet(active) {
+  const main = $('#main'); if (!main) return;
+  const { data: vcs } = await db.from('vehicle_class').select('id,name,pax_min,pax_max').eq('org_id', active.orgId).order('pax_min');
+  const ids = (vcs || []).map(v => v.id);
+  const { data: rates } = ids.length
+    ? await db.from('transport_rate').select('vehicle_class_id,net_price_per_unit,sell_price_per_unit,currency').in('vehicle_class_id', ids)
+    : { data: [] };
+  const rByVc = Object.fromEntries((rates || []).map(r => [r.vehicle_class_id, r]));
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Автопарк</h1><div class="sub">Добавьте классы машин и свою цену (net). DMC видит цену +10% — это комиссия Waylo.</div></div></div>
+    <div class="card"><div class="card-head">Добавить класс</div><div style="padding:14px">
+      <div class="row">
+        <div class="field" style="min-width:280px"><label>Класс машины</label><select class="input" id="flTier">
+          ${FLEET_TIERS.map((t,i) => `<option value="${i}">${esc(t.name)} · ${t.pax_min}–${t.pax_max} pax</option>`).join('')}
+        </select></div>
+        <div class="field" style="width:170px"><label>Ваша цена, $ (за трансфер)</label><input type="number" min="0" step="1" id="flNet" placeholder="напр. 40"></div>
+        <button class="btn btn--primary btn--sm" id="flSave">Добавить</button>
+      </div>
+      <div class="hint" id="flCalc" style="margin-top:8px"></div>
+      <div id="flMsg"></div>
+    </div></div>
+    <div class="card"><div class="card-head">Мой автопарк</div>
+    ${(vcs||[]).length ? `<table><thead><tr><th>Класс</th><th>Pax</th><th style="text-align:right">Ваша цена (net)</th><th style="text-align:right">Цена DMC (sell)</th><th style="text-align:right">Комиссия Waylo</th><th></th></tr></thead><tbody>
+      ${vcs.map(v => { const r = rByVc[v.id]; const net = r?.net_price_per_unit ?? null, sell = r?.sell_price_per_unit ?? null; const com = (net!=null && sell!=null) ? (sell - net) : null; return `<tr><td>${esc(v.name)}</td><td class="mono">${v.pax_min}–${v.pax_max}</td><td class="price" style="text-align:right">${money(net,r?.currency)}</td><td class="price" style="text-align:right">${money(sell,r?.currency)}</td><td class="mono" style="text-align:right">${money(com,r?.currency)}</td><td style="text-align:right"><button class="btn btn--ghost btn--sm flDel" data-id="${v.id}">Удалить</button></td></tr>`; }).join('')}
+    </tbody></table>` : `<div class="card-empty">Автопарк пуст — добавьте класс выше.</div>`}</div>`;
+  const calc = () => { const net = Number($('#flNet').value || 0); $('#flCalc').textContent = net > 0 ? `DMC увидит ${money(Math.round(net*1.1))}, комиссия Waylo ${money(Math.round(net*1.1)-net)} (10%).` : ''; };
+  $('#flNet').oninput = calc;
+  $('#flSave').onclick = async () => {
+    const t = FLEET_TIERS[Number($('#flTier').value)]; const net = Number($('#flNet').value || 0);
+    if (!t || net <= 0) { $('#flMsg').innerHTML = `<div class="notice notice--err">Укажите класс и цену.</div>`; return; }
+    const { data: vc, error: e1 } = await db.from('vehicle_class').insert({ org_id:active.orgId, name:t.name, pax_min:t.pax_min, pax_max:t.pax_max }).select().single();
+    if (e1) { $('#flMsg').innerHTML = `<div class="notice notice--err">${esc(e1.message)}</div>`; return; }
+    const { error: e2 } = await db.from('transport_rate').insert({ vehicle_class_id:vc.id, basis:'per_transfer', valid_from:'2026-01-01', valid_to:'2030-12-31', net_price_per_unit:net, sell_price_per_unit:Math.round(net*1.1*100)/100, currency:'USD' });
+    if (e2) { $('#flMsg').innerHTML = `<div class="notice notice--err">${esc(e2.message)}</div>`; return; }
+    transportFleet(active);
+  };
+  document.querySelectorAll('.flDel').forEach(b => b.onclick = async () => {
+    const { error } = await db.from('vehicle_class').delete().eq('id', b.dataset.id);
+    if (error) $('#flMsg') && ($('#flMsg').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`);
+    else transportFleet(active);
+  });
 }
 
 async function transportAvail(active) {
