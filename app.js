@@ -106,8 +106,17 @@ function renderLogin() {
   $('#loginForm').onsubmit = async (e) => {
     e.preventDefault();
     const btn = $('#loginBtn'); btn.disabled = true; btn.textContent = 'Входим…';
-    const { error } = await db.auth.signInWithPassword({ email:$('#email').value, password:$('#password').value });
-    if (error) { $('#loginErr').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; btn.disabled = false; btn.textContent = 'Войти'; }
+    const fail = (msg) => { $('#loginErr').innerHTML = `<div class="notice notice--err">${esc(msg)}</div>`; btn.disabled = false; btn.textContent = 'Войти'; };
+    try {
+      const res = await Promise.race([
+        db.auth.signInWithPassword({ email:$('#email').value, password:$('#password').value }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 8000)),
+      ]);
+      if (res.error) fail(res.error.message);
+      // успех → onAuthStateChange сам отрисует кабинет
+    } catch (_) {
+      fail('Сервер не отвечает. Похоже, расширение браузера (щит/адблок) блокирует подключение к Supabase — отключите его для этого сайта и войдите снова.');
+    }
   };
 }
 
