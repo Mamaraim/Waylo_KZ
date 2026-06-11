@@ -14,7 +14,12 @@ if (!SUPABASE_ANON_KEY || SUPABASE_ANON_KEY.startsWith("ВСТАВЬ")) {
   throw new Error("anon key not set");
 }
 
-const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// Pass-through lock: некоторые расширения/браузеры блокируют navigator.locks,
+// из-за чего supabase-js v2 зависает на getSession. Свой lock убирает зависание.
+const passthroughLock = async (_name, _timeout, fn) => await fn();
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { lock: passthroughLock, persistSession: true, autoRefreshToken: true },
+});
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
 const $ = (s, r = document) => r.querySelector(s);
@@ -46,9 +51,16 @@ async function loadProfile() {
 }
 
 async function boot() {
-  const { data } = await db.auth.getSession();
-  state.user = data.session?.user || null;
-  if (state.user) await loadProfile();
+  let session = null;
+  try {
+    const res = await Promise.race([
+      db.auth.getSession(),
+      new Promise((resolve) => setTimeout(() => resolve({ data: { session: null } }), 4000)),
+    ]);
+    session = res?.data?.session || null;
+  } catch (_) { session = null; }
+  state.user = session?.user || null;
+  if (state.user) { try { await loadProfile(); } catch (_) {} }
   render();
 }
 db.auth.onAuthStateChange(async (_e, session) => {
