@@ -63,6 +63,14 @@ input:focus,select:focus{outline:2px solid var(--accent-soft);border-color:var(-
 .login-card .field{margin-bottom:13px} .login-card .btn{width:100%;justify-content:center;margin-top:6px;display:flex}
 .login-creds{margin-top:18px;padding-top:16px;border-top:1px solid var(--line-2);font-size:12px;color:var(--muted)}
 .login-creds code{font-family:var(--mono);background:var(--line-2);padding:1px 5px;border-radius:4px;color:var(--ink-2)}
+.seg-q{font-size:12px;color:var(--muted);font-weight:600;margin-bottom:6px}
+.segs{display:flex;gap:6px;margin-bottom:10px}
+.segs button{flex:1;font:inherit;font-size:12.5px;font-weight:600;color:var(--muted);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px 6px;cursor:pointer}
+.segs button:hover{color:var(--ink)}
+.segs button.active{color:var(--accent-ink);background:var(--accent-soft);border-color:var(--accent)}
+.seg-sub{font-size:12px;color:var(--muted);margin-bottom:14px;min-height:16px;line-height:1.4}
+.op-link{margin-top:10px;font-size:12px;color:var(--muted)}
+.op-link a{color:var(--accent-ink);cursor:pointer;text-decoration:underline}
 .center-state{display:grid;place-items:center;min-height:60vh;color:var(--muted)}
 .stat-row{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:18px}
 .stat{flex:1;min-width:140px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
@@ -141,17 +149,35 @@ function render() { state.user ? renderShell() : renderLogin(); }
 
 /* ── login ───────────────────────────────────────────────────────────────── */
 function renderLogin() {
+  const SEGMENTS = [
+    { key:'agency',      label:'Travel Agency', sub:'Турагентства и DMC (Казахстан) — заявки, маршруты, документы, статусы.', email:'dmc@waylo.test' },
+    { key:'hospitality', label:'Hospitality',   sub:'Отели и резорты — подтверждения, доступность, цены.',                 email:'hotel@waylo.test' },
+    { key:'transfer',    label:'Transfer',      sub:'Перевозчики — автопарк, доступность, подтверждения.',                 email:'transfer@waylo.test' },
+  ];
+  let seg = SEGMENTS[0];
   app.innerHTML = `
     <div class="login-wrap"><form class="login-card" id="loginForm">
       <div class="brand">Waylo<span class="chev">›</span><span class="kz">KZ</span></div>
       <div class="tag">Операционный коридор · вход в кабинет</div>
-      <div class="field"><label>Почта</label><input type="email" id="email" autocomplete="username" placeholder="you@company.com" required></div>
+      <div class="field"><label>Кто вы?</label>
+        <select class="input" id="segSel" style="width:100%">${SEGMENTS.map(s => `<option value="${s.key}" ${s.key===seg.key?'selected':''}>${esc(s.label)}</option>`).join('')}</select>
+      </div>
+      <div class="seg-sub" id="segSub">${esc(seg.sub)}</div>
+      <div class="field"><label>Почта</label><input type="email" id="email" autocomplete="username" placeholder="you@company.com" value="${seg.email}" required></div>
       <div class="field"><label>Пароль</label><input type="password" id="password" autocomplete="current-password" required></div>
       <div id="loginErr"></div>
       <button class="btn btn--primary" id="loginBtn">Войти</button>
-      <div class="login-creds">Тест (пароль <code>waylo-test-pass</code>):<br>
-        <code>dmc@waylo.test</code> · <code>hotel@waylo.test</code> · <code>platform@waylo.test</code></div>
+      <div class="login-creds">Тест (пароль <code>waylo-test-pass</code>): <code id="segCred">${esc(seg.email)}</code></div>
+      <div class="op-link">Оператор Waylo — <a id="opLink">platform@waylo.test</a></div>
     </form></div>`;
+  const pick = (s) => {
+    seg = s;
+    $('#segSub').textContent = s.sub;
+    $('#segCred').textContent = s.email;
+    $('#email').value = s.email;
+  };
+  $('#segSel').onchange = () => pick(SEGMENTS.find(x => x.key === $('#segSel').value));
+  $('#opLink').onclick = () => { $('#email').value = 'platform@waylo.test'; $('#segCred').textContent = 'platform@waylo.test'; };
   $('#loginForm').onsubmit = async (e) => {
     e.preventDefault();
     const btn = $('#loginBtn'); btn.disabled = true; btn.textContent = 'Входим…';
