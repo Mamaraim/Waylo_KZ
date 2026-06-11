@@ -144,8 +144,10 @@ function navShell(kicker, tabs) {
 /* ── DMC ─────────────────────────────────────────────────────────────────── */
 async function renderDmc(active) {
   if (!state.tab) state.tab = 'catalog';
-  navShell('DMC · ' + active.orgName, [{ id:'catalog', label:'Каталог' }, { id:'requests', label:'Заявки' }]);
-  state.tab === 'catalog' ? dmcCatalog() : dmcRequests(active);
+  navShell('DMC · ' + active.orgName, [{ id:'catalog', label:'Каталог' }, { id:'requests', label:'Заявки' }, { id:'finance', label:'Финансы' }]);
+  if (state.tab === 'catalog') dmcCatalog();
+  else if (state.tab === 'finance') dmcFinance(active);
+  else dmcRequests(active);
 }
 
 async function dmcCatalog() {
@@ -196,6 +198,23 @@ async function dmcRequests(active) {
   if (state.openReq) renderReqDetail(active, state.openReq);
 }
 
+async function dmcFinance(active) {
+  const main = $('#main'); if (!main) return;
+  const [{ data: inv }, { data: orgs }] = await Promise.all([
+    db.from('invoice').select('*').eq('kind', 'booking').order('issued_at', { ascending:false }),
+    db.from('organization').select('id,name'),
+  ]);
+  const orgName = Object.fromEntries((orgs || []).map(o => [o.id, o.name]));
+  const owed = (inv || []).filter(v => v.status !== 'paid').reduce((s, v) => s + Number(v.amount), 0);
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Финансы</h1><div class="sub">Счета к оплате поставщикам Узбекистана за подтверждённые услуги. Цены — к продаже.</div></div></div>
+    <div class="stat-row"><div class="stat"><div class="n">${money(owed)}</div><div class="l">к оплате поставщикам</div></div><div class="stat"><div class="n">${(inv||[]).length}</div><div class="l">счетов всего</div></div></div>
+    <div class="card"><div class="card-head">Счета поставщикам</div>
+    ${(inv||[]).length ? `<table><thead><tr><th>Счёт</th><th>Поставщик</th><th>Сумма</th><th>Статус</th><th>Выставлен</th></tr></thead><tbody>
+      ${inv.map(v => `<tr><td class="id-cell">${short(v.id)}</td><td>${esc(orgName[v.payee_org_id]||'—')}</td><td class="price">${money(v.amount,v.currency)}</td><td>${badge(v.status)}</td><td class="hint">${v.issued_at?new Date(v.issued_at).toLocaleDateString('ru-RU'):'—'}</td></tr>`).join('')}
+    </tbody></table>` : `<div class="card-empty">Счетов пока нет. Подтвердите услуги по заявке (поставщик во вкладке «Подтверждения») и нажмите «Счёт» на линии.</div>`}</div>`;
+}
+
 async function renderReqDetail(active, reqId) {
   const box = $('#reqDetail'); if (!box) return;
   const { data: lines } = await db.from('request_line').select('*').eq('request_id', reqId).order('created_at');
@@ -204,18 +223,29 @@ async function renderReqDetail(active, reqId) {
     const { data: hs } = await db.from('hold').select('*').in('request_line_id', lines.map(l => l.id));
     (hs || []).forEach(h => { (holdsBy[h.request_line_id] ||= []).push(h); });
   }
+  const { data: binv } = await db.from('invoice').select('payee_org_id,amount').eq('request_id', reqId).eq('kind', 'booking');
+  const invPool = (binv || []).map(v => `${v.payee_org_id}|${Number(v.amount).toFixed(2)}`);
+  const nights = (l) => Math.max(1, Math.round((new Date(l.to_date) - new Date(l.from_date)) / 86400000));
+  const lineTotal = (l) => Number(l.sell_price || 0) * l.quantity * nights(l);
+  const isInvoiced = (l) => { const k = `${l.supplier_org_id}|${lineTotal(l).toFixed(2)}`; const i = invPool.indexOf(k); if (i >= 0) { invPool.splice(i, 1); return true; } return false; };
   box.innerHTML = `
     <div class="card">
       <div class="card-head">Блоки услуг <span id="addLineSlot"></span>${(lines||[]).length ? ` <button class="btn btn--ghost btn--sm" id="voucherBtn">Ваучер</button>` : ''}</div>
       <div id="lineMsg"></div>
       ${(lines||[]).length ? `<table><thead><tr><th>Тип</th><th>Ресурс</th><th>Период</th><th>Кол-во</th><th>Цена</th><th>Подтв.</th><th>Холд</th><th></th></tr></thead><tbody>
-        ${lines.map(l => { const hs = holdsBy[l.id]||[]; const act = hs.filter(h => ['held','confirmed'].includes(h.status)); return `<tr><td>${typeBadge(l.type)}</td><td class="id-cell">${short(l.resource_id)}</td><td class="hint">${esc(l.from_date)} — ${esc(l.to_date)}</td><td class="mono">${l.quantity}</td><td class="price">${money(l.sell_price)}</td><td>${badge(l.confirmation)}</td><td>${act.length?badge(act[0].status):'<span class="hint">нет</span>'}</td><td style="text-align:right">${!act.length?`<button class="btn btn--ghost btn--sm holdBtn" data-id="${l.id}">Захолдить</button>`:''}</td></tr>`; }).join('')}
+        ${lines.map(l => { const hs = holdsBy[l.id]||[]; const act = hs.filter(h => ['held','confirmed'].includes(h.status)); const confirmed = l.confirmation==='confirmed'; const invoiced = confirmed && isInvoiced(l); const actionBtn = confirmed ? (invoiced ? '<span class="hint">счёт ✓</span>' : `<button class="btn btn--ghost btn--sm invBtn" data-id="${l.id}">Счёт</button>`) : (!act.length ? `<button class="btn btn--ghost btn--sm holdBtn" data-id="${l.id}">Захолдить</button>` : ''); return `<tr><td>${typeBadge(l.type)}</td><td class="id-cell">${short(l.resource_id)}</td><td class="hint">${esc(l.from_date)} — ${esc(l.to_date)}</td><td class="mono">${l.quantity}</td><td class="price">${money(l.sell_price)}</td><td>${badge(l.confirmation)}</td><td>${act.length?badge(act[0].status):'<span class="hint">нет</span>'}</td><td style="text-align:right">${actionBtn}</td></tr>`; }).join('')}
       </tbody></table>` : `<div class="card-empty">Добавьте блок из каталога.</div>`}
     </div>`;
   document.querySelectorAll('.holdBtn').forEach(b => b.onclick = async () => {
     const l = lines.find(x => x.id === b.dataset.id);
     const { error } = await db.rpc('place_hold', { p_request_line:l.id, p_resource_type:l.type==='HOTEL'?'room':'vehicle', p_resource_id:l.resource_id, p_from:l.from_date, p_to:l.to_date, p_quantity:l.quantity, p_idempotency_key:crypto.randomUUID() });
     if (error) $('#lineMsg').innerHTML = `<div class="notice notice--err" style="margin:10px 14px">${esc(error.message)}</div>`;
+    else renderReqDetail(active, reqId);
+  });
+  document.querySelectorAll('.invBtn').forEach(b => b.onclick = async () => {
+    b.disabled = true; b.textContent = 'Выставляю…';
+    const { error } = await db.rpc('issue_booking_invoice', { p_request_line: b.dataset.id });
+    if (error) { $('#lineMsg').innerHTML = `<div class="notice notice--err" style="margin:10px 14px">${esc(error.message)}</div>`; b.disabled = false; b.textContent = 'Счёт'; }
     else renderReqDetail(active, reqId);
   });
   const vb = $('#voucherBtn'); if (vb) vb.onclick = () => renderVoucher(reqId, lines);
