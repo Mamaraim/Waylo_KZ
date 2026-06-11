@@ -8,13 +8,12 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const app = document.getElementById('app');
 
 // supabase-js по умолчанию координирует сессию между вкладками через
-// navigator.locks. В этом браузере при нескольких вкладках блокировка не
-// освобождается и getSession виснет навсегда. Опция lock (no-op) отключает
-// эту блокировку. Это безопасно: реентрантность supabase-js отслеживает сам
-// (внутренний флаг lockAcquired), поэтому подменять её не требуется.
+// navigator.locks (виснет) и в фоне обновляет токен по таймеру (виснет
+// «через некоторое время»). Отключаем и то, и другое: свой lock (no-op) +
+// без autoRefresh. Сессия сохраняется; токен живёт ~час, потом — повторный вход.
 const noLock = async (_name, _timeout, fn) => await fn();
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: { lock: noLock, persistSession: true, autoRefreshToken: true },
+  auth: { lock: noLock, persistSession: true, autoRefreshToken: false },
 });
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
@@ -47,9 +46,18 @@ async function loadProfile() {
 }
 
 async function boot() {
-  const { data } = await db.auth.getSession();
-  state.user = data.session?.user || null;
-  if (state.user) await loadProfile();
+  // экран загрузки не должен зависать никогда: если getSession не ответил
+  // за 6 сек — просто показываем вход (это путь загрузки, не действие входа).
+  let session = null;
+  try {
+    const res = await Promise.race([
+      db.auth.getSession(),
+      new Promise((resolve) => setTimeout(() => resolve({ data: { session: null } }), 6000)),
+    ]);
+    session = res?.data?.session || null;
+  } catch (_) {}
+  state.user = session?.user || null;
+  if (state.user) { try { await loadProfile(); } catch (_) {} }
   render();
 }
 db.auth.onAuthStateChange(async (_e, session) => {
