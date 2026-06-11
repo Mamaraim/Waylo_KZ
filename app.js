@@ -7,17 +7,14 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 const app = document.getElementById('app');
 
-if (!SUPABASE_ANON_KEY || SUPABASE_ANON_KEY.startsWith("ВСТАВЬ")) {
-  app.innerHTML = `<div class="config-warn"><b>Нужен anon-ключ.</b><br>
-    Открой Supabase → Settings → API, скопируй <code>anon public</code> и вставь его в этом файле
-    в строку <code>const SUPABASE_ANON_KEY = "…"</code>. После этого обнови страницу.</div>`;
-  throw new Error("anon key not set");
-}
-
-// persistSession=false убирает известный дедлок supabase-js на navigator.locks
-// при перезагрузке (сессия не пишется в браузер → нечего блокировать).
+// supabase-js по умолчанию координирует сессию между вкладками через
+// navigator.locks. В этом браузере при нескольких вкладках блокировка не
+// освобождается и getSession виснет навсегда. Опция lock (no-op) отключает
+// эту блокировку. Это безопасно: реентрантность supabase-js отслеживает сам
+// (внутренний флаг lockAcquired), поэтому подменять её не требуется.
+const noLock = async (_name, _timeout, fn) => await fn();
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false },
+  auth: { lock: noLock, persistSession: true, autoRefreshToken: true },
 });
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
