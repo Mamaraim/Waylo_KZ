@@ -14,7 +14,11 @@ if (!SUPABASE_ANON_KEY || SUPABASE_ANON_KEY.startsWith("ВСТАВЬ")) {
   throw new Error("anon key not set");
 }
 
-const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// persistSession=false убирает известный дедлок supabase-js на navigator.locks
+// при перезагрузке (сессия не пишется в браузер → нечего блокировать).
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
 const $ = (s, r = document) => r.querySelector(s);
