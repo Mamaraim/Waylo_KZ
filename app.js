@@ -200,19 +200,23 @@ async function dmcRequests(active) {
 
 async function dmcFinance(active) {
   const main = $('#main'); if (!main) return;
-  const [{ data: inv }, { data: orgs }] = await Promise.all([
-    db.from('invoice').select('*').eq('kind', 'booking').order('issued_at', { ascending:false }),
-    db.from('organization').select('id,name'),
-  ]);
-  const orgName = Object.fromEntries((orgs || []).map(o => [o.id, o.name]));
-  const owed = (inv || []).filter(v => v.status !== 'paid').reduce((s, v) => s + Number(v.amount), 0);
+  const { data: inv } = await db.from('invoice').select('*').eq('kind', 'client').order('issued_at', { ascending:false });
+  const list = inv || [];
+  const owed = list.filter(v => v.status !== 'paid' && v.status !== 'cancelled').reduce((s, v) => s + Number(v.amount), 0);
   main.innerHTML = `
-    <div class="page-head"><div><h1>Финансы</h1><div class="sub">Счета к оплате поставщикам Узбекистана за подтверждённые услуги. Цены — к продаже.</div></div></div>
-    <div class="stat-row"><div class="stat"><div class="n">${money(owed)}</div><div class="l">к оплате поставщикам</div></div><div class="stat"><div class="n">${(inv||[]).length}</div><div class="l">счетов всего</div></div></div>
-    <div class="card"><div class="card-head">Счета поставщикам</div>
-    ${(inv||[]).length ? `<table><thead><tr><th>Счёт</th><th>Поставщик</th><th>Сумма</th><th>Статус</th><th>Выставлен</th></tr></thead><tbody>
-      ${inv.map(v => `<tr><td class="id-cell">${short(v.id)}</td><td>${esc(orgName[v.payee_org_id]||'—')}</td><td class="price">${money(v.amount,v.currency)}</td><td>${badge(v.status)}</td><td class="hint">${v.issued_at?new Date(v.issued_at).toLocaleDateString('ru-RU'):'—'}</td></tr>`).join('')}
-    </tbody></table>` : `<div class="card-empty">Счетов пока нет. Подтвердите услуги по заявке (поставщик во вкладке «Подтверждения») и нажмите «Счёт» на линии.</div>`}</div>`;
+    <div class="page-head"><div><h1>Финансы</h1><div class="sub">Счета от Waylo за подтверждённые бронирования. Оплата — в адрес Waylo, одним контрагентом.</div></div></div>
+    <div class="stat-row"><div class="stat"><div class="n">${money(owed)}</div><div class="l">к оплате Waylo</div></div><div class="stat"><div class="n">${list.length}</div><div class="l">счетов</div></div></div>
+    <div class="card"><div class="card-head">Счета от Waylo</div>
+    ${list.length ? `<table><thead><tr><th>Счёт</th><th>Заявка</th><th>Сумма</th><th>Статус</th><th>Дата</th><th></th></tr></thead><tbody>
+      ${list.map(v => `<tr><td class="id-cell">${short(v.id)}</td><td class="id-cell">${v.request_id?short(v.request_id):'—'}</td><td class="price">${money(v.amount,v.currency)}</td><td>${badge(v.status)}</td><td class="hint">${v.issued_at?new Date(v.issued_at).toLocaleDateString('ru-RU'):'—'}</td><td style="text-align:right">${v.status!=='paid'?`<button class="btn btn--primary btn--sm payCli" data-inv="${v.id}" data-amt="${v.amount}">Оплатить</button>`:'✓ оплачено'}</td></tr>`).join('')}
+    </tbody></table>` : `<div class="card-empty">Счетов пока нет. Waylo выставит счёт после того, как поставщик подтвердит услуги по заявке.</div>`}</div>`;
+  document.querySelectorAll('.payCli').forEach(b => b.onclick = async () => {
+    if (!confirm('Оплатить счёт Waylo на сумму ' + money(Number(b.dataset.amt)) + '?')) return;
+    b.disabled = true; b.textContent = 'Оплата…';
+    const { error } = await db.rpc('record_payment', { p_invoice: b.dataset.inv, p_amount: Number(b.dataset.amt) });
+    if (error) { alert(error.message); b.disabled = false; b.textContent = 'Оплатить'; }
+    else dmcFinance(active);
+  });
 }
 
 async function renderReqDetail(active, reqId) {
@@ -223,29 +227,18 @@ async function renderReqDetail(active, reqId) {
     const { data: hs } = await db.from('hold').select('*').in('request_line_id', lines.map(l => l.id));
     (hs || []).forEach(h => { (holdsBy[h.request_line_id] ||= []).push(h); });
   }
-  const { data: binv } = await db.from('invoice').select('payee_org_id,amount').eq('request_id', reqId).eq('kind', 'booking');
-  const invPool = (binv || []).map(v => `${v.payee_org_id}|${Number(v.amount).toFixed(2)}`);
-  const nights = (l) => Math.max(1, Math.round((new Date(l.to_date) - new Date(l.from_date)) / 86400000));
-  const lineTotal = (l) => Number(l.sell_price || 0) * l.quantity * nights(l);
-  const isInvoiced = (l) => { const k = `${l.supplier_org_id}|${lineTotal(l).toFixed(2)}`; const i = invPool.indexOf(k); if (i >= 0) { invPool.splice(i, 1); return true; } return false; };
   box.innerHTML = `
     <div class="card">
       <div class="card-head">Блоки услуг <span id="addLineSlot"></span>${(lines||[]).length ? ` <button class="btn btn--ghost btn--sm" id="voucherBtn">Ваучер</button>` : ''}</div>
       <div id="lineMsg"></div>
       ${(lines||[]).length ? `<table><thead><tr><th>Тип</th><th>Ресурс</th><th>Период</th><th>Кол-во</th><th>Цена</th><th>Подтв.</th><th>Холд</th><th></th></tr></thead><tbody>
-        ${lines.map(l => { const hs = holdsBy[l.id]||[]; const act = hs.filter(h => ['held','confirmed'].includes(h.status)); const confirmed = l.confirmation==='confirmed'; const invoiced = confirmed && isInvoiced(l); const actionBtn = confirmed ? (invoiced ? '<span class="hint">счёт ✓</span>' : `<button class="btn btn--ghost btn--sm invBtn" data-id="${l.id}">Счёт</button>`) : (!act.length ? `<button class="btn btn--ghost btn--sm holdBtn" data-id="${l.id}">Захолдить</button>` : ''); return `<tr><td>${typeBadge(l.type)}</td><td class="id-cell">${short(l.resource_id)}</td><td class="hint">${esc(l.from_date)} — ${esc(l.to_date)}</td><td class="mono">${l.quantity}</td><td class="price">${money(l.sell_price)}</td><td>${badge(l.confirmation)}</td><td>${act.length?badge(act[0].status):'<span class="hint">нет</span>'}</td><td style="text-align:right">${actionBtn}</td></tr>`; }).join('')}
+        ${lines.map(l => { const hs = holdsBy[l.id]||[]; const act = hs.filter(h => ['held','confirmed'].includes(h.status)); return `<tr><td>${typeBadge(l.type)}</td><td class="id-cell">${short(l.resource_id)}</td><td class="hint">${esc(l.from_date)} — ${esc(l.to_date)}</td><td class="mono">${l.quantity}</td><td class="price">${money(l.sell_price)}</td><td>${badge(l.confirmation)}</td><td>${act.length?badge(act[0].status):'<span class="hint">нет</span>'}</td><td style="text-align:right">${!act.length?`<button class="btn btn--ghost btn--sm holdBtn" data-id="${l.id}">Захолдить</button>`:''}</td></tr>`; }).join('')}
       </tbody></table>` : `<div class="card-empty">Добавьте блок из каталога.</div>`}
     </div>`;
   document.querySelectorAll('.holdBtn').forEach(b => b.onclick = async () => {
     const l = lines.find(x => x.id === b.dataset.id);
     const { error } = await db.rpc('place_hold', { p_request_line:l.id, p_resource_type:l.type==='HOTEL'?'room':'vehicle', p_resource_id:l.resource_id, p_from:l.from_date, p_to:l.to_date, p_quantity:l.quantity, p_idempotency_key:crypto.randomUUID() });
     if (error) $('#lineMsg').innerHTML = `<div class="notice notice--err" style="margin:10px 14px">${esc(error.message)}</div>`;
-    else renderReqDetail(active, reqId);
-  });
-  document.querySelectorAll('.invBtn').forEach(b => b.onclick = async () => {
-    b.disabled = true; b.textContent = 'Выставляю…';
-    const { error } = await db.rpc('issue_booking_invoice', { p_request_line: b.dataset.id });
-    if (error) { $('#lineMsg').innerHTML = `<div class="notice notice--err" style="margin:10px 14px">${esc(error.message)}</div>`; b.disabled = false; b.textContent = 'Счёт'; }
     else renderReqDetail(active, reqId);
   });
   const vb = $('#voucherBtn'); if (vb) vb.onclick = () => renderVoucher(reqId, lines);
@@ -380,7 +373,7 @@ async function renderHotel(active) {
   navShell('Отель · ' + active.orgName, [{ id:'confirm', label:'Подтверждения' }, { id:'avail', label:'Доступность' }, { id:'finance', label:'Финансы' }]);
   if (state.tab === 'confirm') supplierConfirm(active, 'отель');
   else if (state.tab === 'avail') hotelAvail(active);
-  else hotelFinance(active);
+  else supplierFinance(active);
 }
 
 async function supplierConfirm(active, word) {
@@ -435,22 +428,32 @@ async function hotelAvail(active) {
   };
 }
 
-async function hotelFinance(active) {
+async function supplierFinance(active) {
   const main = $('#main'); if (!main) return;
-  const { data: ac } = await db.from('commission_accrual').select('*').eq('supplier_org_id', active.orgId).order('accrued_at', { ascending:false });
-  const { data: inv } = await db.from('invoice').select('*').order('issued_at', { ascending:false });
-  const total = (ac || []).filter(a => a.status === 'accrued').reduce((s, a) => s + Number(a.amount), 0);
+  const orgId = active.orgId;
+  const [{ data: lines }, { data: accr }, { data: inv }] = await Promise.all([
+    db.from('request_line').select('id,type,from_date,to_date,quantity,sell_price,confirmation').eq('supplier_org_id', orgId).eq('confirmation', 'confirmed').order('created_at', { ascending:false }),
+    db.from('commission_accrual').select('request_line_id,amount').eq('supplier_org_id', orgId),
+    db.from('invoice').select('*').eq('kind', 'payout').eq('payee_org_id', orgId).order('issued_at', { ascending:false }),
+  ]);
+  const spreadByLine = Object.fromEntries((accr || []).map(a => [a.request_line_id, Number(a.amount)]));
+  const nights = (l) => Math.max(1, Math.round((new Date(l.to_date) - new Date(l.from_date)) / 86400000));
+  const netOf = (l) => Number(l.sell_price || 0) * l.quantity * nights(l) - (spreadByLine[l.id] || 0);
+  const netTotal = (lines || []).reduce((s, l) => s + netOf(l), 0);
+  const invList = inv || [];
+  const paidOut = invList.filter(v => v.status === 'paid').reduce((s, v) => s + Number(v.amount), 0);
+  const pendingOut = invList.filter(v => v.status !== 'paid' && v.status !== 'cancelled').reduce((s, v) => s + Number(v.amount), 0);
   main.innerHTML = `
-    <div class="page-head"><div><h1>Финансы</h1><div class="sub">Начисленный спред Waylo по подтверждённым линиям и счета.</div></div></div>
-    <div class="stat-row"><div class="stat"><div class="n">${money(total)}</div><div class="l">спред к выставлению</div></div><div class="stat"><div class="n">${(ac||[]).length}</div><div class="l">начислений всего</div></div></div>
-    <div class="card"><div class="card-head">Начисления спреда</div>
-    ${(ac||[]).length ? `<table><thead><tr><th>Линия</th><th>Сумма</th><th>Статус</th><th>Начислено</th></tr></thead><tbody>
-      ${ac.map(a => `<tr><td class="id-cell">${short(a.request_line_id)}</td><td class="price">${money(a.amount,a.currency)}</td><td>${badge(a.status)}</td><td class="hint">${new Date(a.accrued_at).toLocaleDateString('ru-RU')}</td></tr>`).join('')}
-    </tbody></table>` : `<div class="card-empty">Пока нет — подтвердите линию во вкладке «Подтверждения».</div>`}</div>
-    <div class="card"><div class="card-head">Счета</div>
-    ${(inv||[]).length ? `<table><thead><tr><th>Счёт</th><th>Тип</th><th>Сумма</th><th>Статус</th></tr></thead><tbody>
-      ${inv.map(v => `<tr><td class="id-cell">${short(v.id)}</td><td>${badge(v.kind==='commission'?'invoiced':'issued', v.kind==='commission'?'комиссия':'бронь')}</td><td class="price">${money(v.amount,v.currency)}</td><td>${badge(v.status)}</td></tr>`).join('')}
-    </tbody></table>` : `<div class="card-empty">Счетов пока нет.</div>`}</div>`;
+    <div class="page-head"><div><h1>Финансы</h1><div class="sub">Выплаты от Waylo за подтверждённые услуги. Сумма — ваше нетто; Waylo — единый плательщик.</div></div></div>
+    <div class="stat-row"><div class="stat"><div class="n">${money(netTotal)}</div><div class="l">нетто подтверждено</div></div><div class="stat"><div class="n">${money(pendingOut)}</div><div class="l">выплата ожидается</div></div><div class="stat"><div class="n">${money(paidOut)}</div><div class="l">выплачено</div></div></div>
+    <div class="card"><div class="card-head">Подтверждённые услуги (нетто к выплате)</div>
+    ${(lines||[]).length ? `<table><thead><tr><th>Линия</th><th>Тип</th><th>Период</th><th>Кол-во</th><th style="text-align:right">Нетто</th></tr></thead><tbody>
+      ${lines.map(l => `<tr><td class="id-cell">${short(l.id)}</td><td>${typeBadge(l.type)}</td><td class="hint">${esc(l.from_date)} — ${esc(l.to_date)}</td><td class="mono">${l.quantity}</td><td class="price" style="text-align:right">${money(netOf(l))}</td></tr>`).join('')}
+    </tbody></table>` : `<div class="card-empty">Нет подтверждённых услуг. Подтвердите холды во вкладке «Подтверждения».</div>`}</div>
+    <div class="card"><div class="card-head">Выплаты от Waylo</div>
+    ${invList.length ? `<table><thead><tr><th>Выплата</th><th>Заявка</th><th>Сумма</th><th>Статус</th><th>Дата</th></tr></thead><tbody>
+      ${invList.map(v => `<tr><td class="id-cell">${short(v.id)}</td><td class="id-cell">${v.request_id?short(v.request_id):'—'}</td><td class="price">${money(v.amount,v.currency)}</td><td>${badge(v.status)}</td><td class="hint">${v.issued_at?new Date(v.issued_at).toLocaleDateString('ru-RU'):'—'}</td></tr>`).join('')}
+    </tbody></table>` : `<div class="card-empty">Выплат пока нет. Waylo проведёт выплату после подтверждения услуг.</div>`}</div>`;
 }
 
 /* ── TRANSPORT ───────────────────────────────────────────────────────────── */
@@ -460,7 +463,7 @@ async function renderTransport(active) {
   if (state.tab === 'fleet') transportFleet(active);
   else if (state.tab === 'avail') transportAvail(active);
   else if (state.tab === 'confirm') supplierConfirm(active, 'трансфер');
-  else hotelFinance(active);
+  else supplierFinance(active);
 }
 
 // Стандартная линейка классов (pax → тип машины)
@@ -559,37 +562,55 @@ async function renderPlatform() {
         ${orgs.map(o => `<tr><td>${esc(o.name)}</td><td><span class="badge badge--${ORG_BADGE[o.type]||'gray'}">${esc(o.type)}</span></td><td>${esc(o.country||'—')}</td><td>${badge(o.status)}</td><td class="id-cell">${short(o.id)}</td></tr>`).join('')}
       </tbody></table>` : `<div class="card-empty">Нет организаций.</div>`}</div>`;
   } else {
-    const [{ data: orgs }, { data: acc }, { data: inv }] = await Promise.all([
+    const [{ data: orgs }, { data: reqs }, { data: lines }, { data: accr }, { data: inv }] = await Promise.all([
       db.from('organization').select('id,name,type'),
-      db.from('commission_accrual').select('supplier_org_id,amount,currency,status').eq('status', 'accrued'),
-      db.from('invoice').select('*').order('issued_at', { ascending:false }),
+      db.from('request').select('id,dmc_org_id'),
+      db.from('request_line').select('id,request_id,supplier_org_id,quantity,sell_price,from_date,to_date').eq('confirmation', 'confirmed'),
+      db.from('commission_accrual').select('request_line_id,amount,supplier_org_id'),
+      db.from('invoice').select('*').in('kind', ['client', 'payout']).order('issued_at', { ascending:false }),
     ]);
     const orgName = Object.fromEntries((orgs||[]).map(o => [o.id, o.name]));
-    const bySup = {};
-    (acc||[]).forEach(a => { const s = bySup[a.supplier_org_id] || { sum:0, cur:a.currency||'USD' }; s.sum += Number(a.amount||0); bySup[a.supplier_org_id] = s; });
-    const supRows = Object.entries(bySup).filter(([, v]) => v.sum > 0);
+    const reqById = Object.fromEntries((reqs||[]).map(r => [r.id, r]));
+    const spreadByLine = Object.fromEntries((accr||[]).map(a => [a.request_line_id, Number(a.amount)]));
+    const nights = (l) => Math.max(1, Math.round((new Date(l.to_date) - new Date(l.from_date)) / 86400000));
+    const sellOf = (l) => Number(l.sell_price||0) * l.quantity * nights(l);
+    const byReq = {};
+    (lines||[]).forEach(l => { const r = byReq[l.request_id] || { sell:0, spread:0, suppliers:new Set() }; r.sell += sellOf(l); r.spread += (spreadByLine[l.id]||0); r.suppliers.add(l.supplier_org_id); byReq[l.request_id] = r; });
+    const reqRows = Object.entries(byReq);
+    const invList = inv || [];
+    const marginTotal = reqRows.reduce((s, [, v]) => s + v.spread, 0);
+    const recvPaid = invList.filter(v => v.kind==='client' && v.status==='paid').reduce((s,v)=>s+Number(v.amount),0);
+    const paidOut = invList.filter(v => v.kind==='payout' && v.status==='paid').reduce((s,v)=>s+Number(v.amount),0);
+    const hasClient = new Set(invList.filter(v => v.kind==='client').map(v => v.request_id));
+    const payoutKey = new Set(invList.filter(v => v.kind==='payout').map(v => v.request_id + '|' + v.payee_org_id));
     main.innerHTML = `
-      <div class="page-head"><div><h1>Деньги</h1><div class="sub">Комиссия Waylo: начисления → счёт поставщику → оплата → погашено.</div></div></div>
-      <div class="card"><div class="card-head">Спред к выставлению (по поставщикам)</div>
-      ${supRows.length ? `<table><thead><tr><th>Поставщик</th><th style="text-align:right">Накоплено</th><th></th></tr></thead><tbody>
-        ${supRows.map(([sid, v]) => `<tr><td>${esc(orgName[sid] || short(sid))}</td><td class="price" style="text-align:right">${money(v.sum, v.cur)}</td><td style="text-align:right"><button class="btn btn--primary btn--sm issueCom" data-sup="${sid}">Выставить commission-счёт</button></td></tr>`).join('')}
-      </tbody></table>` : `<div class="card-empty">Нет накопленного спреда к выставлению.</div>`}</div>
-      <div class="card"><div class="card-head">Счета</div>
-      ${(inv||[]).length ? `<table><thead><tr><th>Счёт</th><th>Тип</th><th>Плательщик → Получатель</th><th style="text-align:right">Сумма</th><th>Статус</th><th></th></tr></thead><tbody>
-        ${inv.map(v => `<tr><td class="id-cell">${short(v.id)}</td><td>${v.kind==='commission'?'комиссия':'бронь'}</td><td>${esc(orgName[v.payer_org_id] || short(v.payer_org_id))} → ${esc(orgName[v.payee_org_id] || short(v.payee_org_id))}</td><td class="price" style="text-align:right">${money(v.amount, v.currency)}</td><td>${badge(v.status)}</td><td style="text-align:right">${v.status!=='paid' ? `<button class="btn btn--ghost btn--sm payInv" data-inv="${v.id}" data-amt="${v.amount}">Отметить оплату</button>` : '✓ оплачено'}</td></tr>`).join('')}
-      </tbody></table>` : `<div class="card-empty">Счетов пока нет.</div>`}</div>`;
-    document.querySelectorAll('.issueCom').forEach(b => b.onclick = async () => {
+      <div class="page-head"><div><h1>Деньги</h1><div class="sub">Waylo — расчётный центр: получаем с DMC (sell), платим поставщикам (net), оставляем спред.</div></div></div>
+      <div class="stat-row"><div class="stat"><div class="n">${money(marginTotal)}</div><div class="l">маржа Waylo (спред)</div></div><div class="stat"><div class="n">${money(recvPaid)}</div><div class="l">получено с клиентов</div></div><div class="stat"><div class="n">${money(paidOut)}</div><div class="l">выплачено поставщикам</div></div></div>
+      <div class="card"><div class="card-head">Расчёты по заявкам</div>
+      ${reqRows.length ? `<table><thead><tr><th>Заявка</th><th>DMC</th><th style="text-align:right">С клиента (sell)</th><th style="text-align:right">Поставщикам (net)</th><th style="text-align:right">Маржа</th><th></th></tr></thead><tbody>
+        ${reqRows.map(([rid, v]) => { const dmc = reqById[rid]?.dmc_org_id; const net = v.sell - v.spread; const sups = [...v.suppliers]; const allPaid = sups.length && sups.every(s => payoutKey.has(rid + '|' + s)); return `<tr><td class="id-cell">${short(rid)}</td><td>${esc(orgName[dmc]||'—')}</td><td class="price" style="text-align:right">${money(v.sell)}</td><td class="price" style="text-align:right">${money(net)}</td><td class="price" style="text-align:right"><b>${money(v.spread)}</b></td><td style="text-align:right;white-space:nowrap">${hasClient.has(rid)?'<span class="hint">счёт ✓</span>':`<button class="btn btn--primary btn--sm issCli" data-req="${rid}">Счёт клиенту</button>`} ${allPaid?'<span class="hint">выплачено ✓</span>':`<button class="btn btn--ghost btn--sm issPay" data-req="${rid}" data-sups="${sups.join(',')}">Выплатить</button>`}</td></tr>`; }).join('')}
+      </tbody></table>` : `<div class="card-empty">Нет подтверждённых услуг для расчёта.</div>`}</div>
+      <div class="card"><div class="card-head">Счета и выплаты</div>
+      ${invList.length ? `<table><thead><tr><th>Док</th><th>Тип</th><th>Плательщик → Получатель</th><th style="text-align:right">Сумма</th><th>Статус</th><th></th></tr></thead><tbody>
+        ${invList.map(v => `<tr><td class="id-cell">${short(v.id)}</td><td>${v.kind==='client'?'счёт DMC':'выплата'}</td><td>${esc(orgName[v.payer_org_id] || short(v.payer_org_id))} → ${esc(orgName[v.payee_org_id] || short(v.payee_org_id))}</td><td class="price" style="text-align:right">${money(v.amount, v.currency)}</td><td>${badge(v.status)}</td><td style="text-align:right">${v.status!=='paid' ? `<button class="btn btn--ghost btn--sm payInv" data-inv="${v.id}" data-amt="${v.amount}">Отметить оплату</button>` : '✓ оплачено'}</td></tr>`).join('')}
+      </tbody></table>` : `<div class="card-empty">Документов пока нет.</div>`}</div>`;
+    document.querySelectorAll('.issCli').forEach(b => b.onclick = async () => {
       b.disabled = true; b.textContent = 'Выставляем…';
-      const { error } = await db.rpc('issue_commission_invoice', { p_supplier: b.dataset.sup });
-      if (error) { alert(error.message); b.disabled = false; b.textContent = 'Выставить commission-счёт'; }
-      else renderPlatform();
+      const { error } = await db.rpc('issue_client_invoice', { p_request: b.dataset.req });
+      if (error) { alert(error.message); b.disabled = false; b.textContent = 'Счёт клиенту'; } else renderPlatform();
+    });
+    document.querySelectorAll('.issPay').forEach(b => b.onclick = async () => {
+      b.disabled = true; b.textContent = 'Выплата…';
+      const sups = b.dataset.sups.split(',').filter(Boolean);
+      let err = null;
+      for (const s of sups) { const { error } = await db.rpc('issue_supplier_payout', { p_request: b.dataset.req, p_supplier: s }); if (error) { err = error; break; } }
+      if (err) { alert(err.message); b.disabled = false; b.textContent = 'Выплатить'; } else renderPlatform();
     });
     document.querySelectorAll('.payInv').forEach(b => b.onclick = async () => {
-      if (!confirm('Отметить счёт как оплаченный на сумму ' + money(Number(b.dataset.amt)) + '?')) return;
+      if (!confirm('Отметить как оплачено на сумму ' + money(Number(b.dataset.amt)) + '?')) return;
       b.disabled = true; b.textContent = 'Проводим…';
       const { error } = await db.rpc('record_payment', { p_invoice: b.dataset.inv, p_amount: Number(b.dataset.amt) });
-      if (error) { alert(error.message); b.disabled = false; b.textContent = 'Отметить оплату'; }
-      else renderPlatform();
+      if (error) { alert(error.message); b.disabled = false; b.textContent = 'Отметить оплату'; } else renderPlatform();
     });
   }
 }
