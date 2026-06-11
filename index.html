@@ -85,22 +85,35 @@ input:focus,select:focus{outline:2px solid var(--accent-soft);border-color:var(-
 <body>
 <div id="app"><div style="min-height:100vh;display:grid;place-items:center;color:#7a8a99;font-family:system-ui,sans-serif">Загрузка…</div></div>
 
-<!-- supabase-js из CDN (UMD: глобальная переменная `supabase`) -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-  // app.js грузится ВСЕГДА свежим (метка времени в URL). Этот index.html больше
-  // не меняется — значит кэш на нём не страшен, логика всегда актуальна.
+  // Финальный загрузчик. index.html больше не меняется. Вся логика в app.js
+  // (грузится всегда свежим). Supabase — с запасным CDN. Любая ошибка
+  // показывается прямо на экране, чтобы не было «немого» белого окна.
   (function () {
-    var s = document.createElement("script");
-    s.src = "app.js?t=" + Date.now();
-    s.onerror = function () {
-      document.getElementById("app").innerHTML =
-        '<div style="min-height:100vh;display:grid;place-items:center;text-align:center;font-family:system-ui,sans-serif;color:#334">' +
-        '<div>Не удалось загрузить приложение.<br><br>' +
-        '<button onclick="location.reload(true)" style="padding:10px 18px;border:0;background:#0a7;color:#fff;border-radius:8px;cursor:pointer">Обновить</button>' +
-        '</div></div>';
-    };
-    document.body.appendChild(s);
+    var appEl = document.getElementById('app');
+    function show(html) {
+      appEl.innerHTML = '<div style="min-height:100vh;display:grid;place-items:center;text-align:center;font-family:system-ui,sans-serif;color:#334"><div style="max-width:440px;padding:24px;line-height:1.55">' + html + '<br><br><button onclick="location.reload(true)" style="padding:10px 18px;border:0;background:#0a7;color:#fff;border-radius:8px;cursor:pointer">Обновить</button></div></div>';
+    }
+    window.addEventListener('error', function (e) {
+      if (appEl && appEl.textContent.indexOf('Загрузка') !== -1) {
+        show('Ошибка при запуске:<br><code style="color:#b00">' + ((e && e.message) || 'неизвестная ошибка') + '</code>');
+      }
+    });
+    function loadScript(src, onload, onerror) {
+      var s = document.createElement('script');
+      s.src = src; s.onload = onload; s.onerror = onerror;
+      document.head.appendChild(s);
+    }
+    function loadApp() {
+      loadScript('app.js?t=' + Date.now(), null, function () {
+        show('Не удалось загрузить приложение (app.js). Проверьте, что файл лежит в репозитории.');
+      });
+    }
+    loadScript('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2', loadApp, function () {
+      loadScript('https://unpkg.com/@supabase/supabase-js@2', loadApp, function () {
+        show('Не удалось загрузить библиотеку Supabase. Скорее всего её блокирует расширение браузера (адблок или защита) — отключите его для этого сайта и нажмите «Обновить».');
+      });
+    });
   })();
 </script>
 </body>
