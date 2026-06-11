@@ -83,7 +83,6 @@ input:focus,select:focus{outline:2px solid var(--accent-soft);border-color:var(-
    =========================================================================== */
 const SUPABASE_URL = "https://rfxenahasipffiuommvx.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJmeGVuYWhhc2lwZmZpdW9tbXZ4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODExNDE3NTEsImV4cCI6MjA5NjcxNzc1MX0.4inQoQjNxBmpn_zsuJj6cdW283-kzTGB-TCj14G1KYw";
-
 const app = document.getElementById('app');
 
 if (!SUPABASE_ANON_KEY || SUPABASE_ANON_KEY.startsWith("ВСТАВЬ")) {
@@ -211,22 +210,30 @@ async function renderDmc(active) {
 }
 
 async function dmcCatalog() {
-  const [{ data: props }, { data: types }, { data: rates, error }] = await Promise.all([
+  const [{ data: props }, { data: types }, { data: rates, error }, { data: vcs }, { data: trates }] = await Promise.all([
     db.from('property').select('id,name,city,kind,star_category').eq('is_active', true),
     db.from('room_type').select('id,property_id,name'),
     db.from('room_rate_public').select('room_type_id,sell_price,sgl_supplement,currency,valid_from,valid_to'),
+    db.from('vehicle_class').select('id,name,pax_min,pax_max'),
+    db.from('transport_rate_public').select('vehicle_class_id,basis,sell_price_per_unit,currency,valid_from,valid_to'),
   ]);
   const main = $('#main'); if (!main) return;
   if (error) { main.innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; return; }
   const pById = Object.fromEntries((props || []).map(p => [p.id, p]));
   const tById = Object.fromEntries((types || []).map(t => [t.id, t]));
   const rows = (rates || []).map(r => { const t = tById[r.room_type_id]; const p = t && pById[t.property_id]; return p ? { ...r, room:t.name, property:p.name, city:p.city, kind:p.kind, star:p.star_category } : null; }).filter(Boolean);
+  const vById = Object.fromEntries((vcs || []).map(v => [v.id, v]));
+  const trows = (trates || []).map(r => { const v = vById[r.vehicle_class_id]; return v ? { ...r, vname:v.name, pax:`${v.pax_min}–${v.pax_max}` } : null; }).filter(Boolean);
   main.innerHTML = `
     <div class="page-head"><div><h1>Каталог</h1><div class="sub">Цена — к продаже. Контрактная себестоимость поставщика вам не видна.</div></div></div>
     <div class="card"><div class="card-head">Размещения</div>
     ${rows.length ? `<table><thead><tr><th>Объект</th><th>Город</th><th>Номер</th><th>Период</th><th style="text-align:right">Цена/ночь</th><th style="text-align:right">SGL</th></tr></thead><tbody>
       ${rows.map(r => `<tr><td>${esc(r.property)}${r.kind==='resort'?' <span class="badge badge--accent">резорт</span>':''}${r.star?` <span class="hint">· ${r.star}★</span>`:''}</td><td>${esc(r.city)}</td><td>${esc(r.room)}</td><td class="hint">${esc(r.valid_from)} — ${esc(r.valid_to)}</td><td class="price" style="text-align:right">${money(r.sell_price,r.currency)}</td><td class="mono" style="text-align:right">${money(r.sgl_supplement,r.currency)}</td></tr>`).join('')}
-    </tbody></table>` : `<div class="card-empty">Пока нет активных тарифов.</div>`}</div>`;
+    </tbody></table>` : `<div class="card-empty">Пока нет активных тарифов.</div>`}</div>
+    <div class="card"><div class="card-head">Трансферы</div>
+    ${trows.length ? `<table><thead><tr><th>Класс машины</th><th>Pax</th><th>Тариф</th><th>Период</th><th style="text-align:right">Цена</th></tr></thead><tbody>
+      ${trows.map(r => `<tr><td>${esc(r.vname)}</td><td class="mono">${esc(r.pax)}</td><td class="hint">${r.basis==='per_transfer'?'за трансфер':'за день'}</td><td class="hint">${esc(r.valid_from)} — ${esc(r.valid_to)}</td><td class="price" style="text-align:right">${money(r.sell_price_per_unit,r.currency)}</td></tr>`).join('')}
+    </tbody></table>` : `<div class="card-empty">Пока нет трансферов.</div>`}</div>`;
 }
 
 async function dmcRequests(active) {
@@ -277,8 +284,8 @@ async function renderReqDetail(active, reqId) {
 
 function renderAddLine(reqId, onAdded) {
   const slot = $('#addLineSlot'); if (!slot) return;
-  slot.innerHTML = `<button class="btn btn--ghost btn--sm" id="addLineBtn">+ Добавить отель</button>`;
-  $('#addLineBtn').onclick = async () => {
+  slot.innerHTML = `<button class="btn btn--ghost btn--sm" id="addHotelBtn">+ Отель</button> <button class="btn btn--ghost btn--sm" id="addTransferBtn">+ Трансфер</button>`;
+  $('#addHotelBtn').onclick = async () => {
     const [{ data: props }, { data: types }, { data: rates }] = await Promise.all([
       db.from('property').select('id,name,org_id').eq('is_active', true),
       db.from('room_type').select('id,property_id,name'),
@@ -287,23 +294,42 @@ function renderAddLine(reqId, onAdded) {
     const pById = Object.fromEntries((props || []).map(p => [p.id, p]));
     const rateBy = Object.fromEntries((rates || []).map(r => [r.room_type_id, r]));
     const opts = (types || []).map(t => { const p = pById[t.property_id]; const r = rateBy[t.id]; return p && r ? { id:t.id, label:`${p.name} · ${t.name}`, supplier:p.org_id, sell:r.sell_price, currency:r.currency } : null; }).filter(Boolean);
-    const form = $('#lineMsg');
-    form.innerHTML = `<div class="row" style="margin:10px 14px">
-      <div class="field" style="min-width:240px"><label>Номер</label><select class="input" id="alRt"><option value="">— выбрать —</option>${opts.map(o => `<option value="${o.id}">${esc(o.label)} (${money(o.sell,o.currency)})</option>`).join('')}</select></div>
-      <div class="field"><label>Заезд</label><input type="date" id="alFrom"></div>
-      <div class="field"><label>Выезд</label><input type="date" id="alTo"></div>
-      <div class="field" style="width:84px"><label>Номеров</label><input type="number" min="1" value="1" id="alQty"></div>
-      <button class="btn btn--primary btn--sm" id="alSave">Добавить</button>
-      <button class="btn btn--ghost btn--sm" id="alCancel">Отмена</button></div>`;
-    $('#alCancel').onclick = () => { form.innerHTML = ''; };
-    $('#alSave').onclick = async () => {
-      const o = opts.find(x => x.id === $('#alRt').value);
-      const from = $('#alFrom').value, to = $('#alTo').value, qty = Number($('#alQty').value || 1);
-      if (!o || !from || !to) { form.innerHTML = `<div class="notice notice--err" style="margin:10px 14px">Заполните номер и даты.</div>`; return; }
-      const { error } = await db.from('request_line').insert({ request_id:reqId, supplier_org_id:o.supplier, type:'HOTEL', resource_id:o.id, from_date:from, to_date:to, quantity:qty, sell_price:o.sell, confirmation:'pending' });
-      if (error) { form.innerHTML = `<div class="notice notice--err" style="margin:10px 14px">${esc(error.message)}</div>`; return; }
-      onAdded();
-    };
+    lineForm('HOTEL', opts, reqId, onAdded);
+  };
+  $('#addTransferBtn').onclick = async () => {
+    const [{ data: vcs }, { data: rates }] = await Promise.all([
+      db.from('vehicle_class').select('id,name,org_id,pax_min,pax_max'),
+      db.from('transport_rate_public').select('vehicle_class_id,sell_price_per_unit,currency'),
+    ]);
+    const vById = Object.fromEntries((vcs || []).map(v => [v.id, v]));
+    const opts = (rates || []).map(r => { const v = vById[r.vehicle_class_id]; return v ? { id:v.id, label:`${v.name} (${v.pax_min}–${v.pax_max} pax)`, supplier:v.org_id, sell:r.sell_price_per_unit, currency:r.currency } : null; }).filter(Boolean);
+    lineForm('TRANSPORT', opts, reqId, onAdded);
+  };
+}
+
+function lineForm(type, opts, reqId, onAdded) {
+  const isHotel = type === 'HOTEL';
+  const form = $('#lineMsg');
+  const dateFields = isHotel
+    ? `<div class="field"><label>Заезд</label><input type="date" id="lfFrom"></div><div class="field"><label>Выезд</label><input type="date" id="lfTo"></div>`
+    : `<div class="field"><label>Дата</label><input type="date" id="lfDate"></div>`;
+  form.innerHTML = `<div class="row" style="margin:10px 14px">
+    <div class="field" style="min-width:240px"><label>${isHotel ? 'Номер' : 'Класс машины'}</label><select class="input" id="lfRes"><option value="">— выбрать —</option>${opts.map(o => `<option value="${o.id}">${esc(o.label)} (${money(o.sell,o.currency)})</option>`).join('')}</select></div>
+    ${dateFields}
+    <div class="field" style="width:90px"><label>${isHotel ? 'Номеров' : 'Машин'}</label><input type="number" min="1" value="1" id="lfQty"></div>
+    <button class="btn btn--primary btn--sm" id="lfSave">Добавить</button>
+    <button class="btn btn--ghost btn--sm" id="lfCancel">Отмена</button></div>`;
+  $('#lfCancel').onclick = () => { form.innerHTML = ''; };
+  $('#lfSave').onclick = async () => {
+    const o = opts.find(x => x.id === $('#lfRes').value);
+    let from, to;
+    if (isHotel) { from = $('#lfFrom').value; to = $('#lfTo').value; }
+    else { from = $('#lfDate').value; if (from) { const d = new Date(from); d.setDate(d.getDate() + 1); to = d.toISOString().slice(0, 10); } }
+    const qty = Number($('#lfQty').value || 1);
+    if (!o || !from || !to) { form.innerHTML = `<div class="notice notice--err" style="margin:10px 14px">Заполните поля.</div>`; return; }
+    const { error } = await db.from('request_line').insert({ request_id:reqId, supplier_org_id:o.supplier, type, resource_id:o.id, from_date:from, to_date:to, quantity:qty, sell_price:o.sell, confirmation:'pending' });
+    if (error) { form.innerHTML = `<div class="notice notice--err" style="margin:10px 14px">${esc(error.message)}</div>`; return; }
+    onAdded();
   };
 }
 
@@ -389,9 +415,39 @@ async function hotelFinance(active) {
 /* ── TRANSPORT ───────────────────────────────────────────────────────────── */
 async function renderTransport(active) {
   if (!state.tab) state.tab = 'confirm';
-  navShell('Транспорт · ' + active.orgName, [{ id:'confirm', label:'Подтверждения' }, { id:'avail', label:'Доступность' }, { id:'finance', label:'Финансы' }]);
-  if (state.tab === 'confirm') supplierConfirm(active, 'транспорт');
-  else { const m = $('#main'); if (m) m.innerHTML = `<div class="page-head"><div><h1>В работе</h1><div class="sub">Доступность по классам машин и финансы — добавим следующим шагом (логика как у отеля).</div></div></div><div class="card"><div class="card-empty">Раздел будет здесь.</div></div>`; }
+  navShell('Трансфер · ' + active.orgName, [{ id:'confirm', label:'Подтверждения' }, { id:'avail', label:'Доступность' }, { id:'finance', label:'Финансы' }]);
+  if (state.tab === 'confirm') supplierConfirm(active, 'трансфер');
+  else if (state.tab === 'avail') transportAvail(active);
+  else hotelFinance(active);
+}
+
+async function transportAvail(active) {
+  const main = $('#main'); if (!main) return;
+  const { data: vcs } = await db.from('vehicle_class').select('id,name,pax_min,pax_max').eq('org_id', active.orgId);
+  const classes = (vcs || []).map(v => ({ id:v.id, label:`${v.name} (${v.pax_min}–${v.pax_max} pax)` }));
+  const ids = classes.map(c => c.id);
+  const { data: av } = ids.length ? await db.from('transport_availability').select('*').in('vehicle_class_id', ids).order('day') : { data: [] };
+  const cLabel = Object.fromEntries(classes.map(c => [c.id, c.label]));
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Доступность</h1><div class="sub">Сколько машин каждого класса выделено под Waylo по датам.</div></div></div>
+    <div class="card"><div class="card-head">Добавить / обновить</div><div style="padding:14px">
+      <div class="row">
+        <div class="field" style="min-width:240px"><label>Класс машины</label><select class="input" id="tvVc"><option value="">— выбрать —</option>${classes.map(c => `<option value="${c.id}">${esc(c.label)}</option>`).join('')}</select></div>
+        <div class="field"><label>Дата</label><input type="date" id="tvDay"></div>
+        <div class="field" style="width:90px"><label>Машин</label><input type="number" min="0" value="1" id="tvUnits"></div>
+        <button class="btn btn--primary btn--sm" id="tvSave">Сохранить</button>
+      </div><div id="tvMsg"></div></div></div>
+    <div class="card"><div class="card-head">Текущая доступность</div>
+    ${(av||[]).length ? `<table><thead><tr><th>Класс</th><th>Дата</th><th style="text-align:right">Машин</th></tr></thead><tbody>
+      ${av.map(a => `<tr><td>${esc(cLabel[a.vehicle_class_id])}</td><td class="hint">${esc(a.day)}</td><td class="mono" style="text-align:right">${a.units}</td></tr>`).join('')}
+    </tbody></table>` : `<div class="card-empty">Доступность не задана.</div>`}</div>`;
+  $('#tvSave').onclick = async () => {
+    const vc = $('#tvVc').value, day = $('#tvDay').value, units = Number($('#tvUnits').value || 0);
+    if (!vc || !day) { $('#tvMsg').innerHTML = `<div class="notice notice--err">Выберите класс и дату.</div>`; return; }
+    const { error } = await db.from('transport_availability').upsert({ vehicle_class_id:vc, day, units }, { onConflict:'vehicle_class_id,day' });
+    if (error) $('#tvMsg').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`;
+    else transportAvail(active);
+  };
 }
 
 /* ── PLATFORM ────────────────────────────────────────────────────────────── */
