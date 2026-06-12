@@ -313,18 +313,14 @@ async function renderReqDetail(active, reqId) {
   if (calcSt.stops.length) calcCompute();
 }
 
-// нормализуем сохранённый расчёт (или создаём пустой со структурой по умолчанию)
+// нормализуем сохранённый расчёт (или создаём пустой)
 function normCalc(raw) {
   const base = newCalc();
   if (raw && typeof raw === 'object') {
     base.profit = (typeof raw.profit === 'number') ? raw.profit : base.profit;
-    base.guide = Object.assign(base.guide, raw.guide || {});
     base.stops = Array.isArray(raw.stops) ? raw.stops : [];
     base.trans = Array.isArray(raw.trans) ? raw.trans : [];
-    base.meals = Array.isArray(raw.meals) ? raw.meals : [];
-    base.shows = Array.isArray(raw.shows) ? raw.shows : [];
     base.misc = Array.isArray(raw.misc) ? raw.misc : base.misc;
-    base.entr = (raw.entr && typeof raw.entr === 'object') ? raw.entr : {};
   }
   return base;
 }
@@ -704,68 +700,59 @@ async function renderPlatform() {
    Маршрут по локациям → проживание (отели/резорты из каталога Waylo; цена к
    продаже = себестоимость DMC) → транспорт/питание/билеты по городам → гид,
    шоу, прочее → прибыль $/чел → цена для клиента по размеру группы. */
-let calcCat = null;   // каталог из базы: {acc:[...], veh:[...]}
-let calcSt  = null;   // рабочее состояние расчёта
-let calcTour = null;  // тур, к которому привязан расчёт: {id,name,pax,currency}
+let calcCat = null;   // каталог: {acc:[...], cities:[...], veh:[...]}
+let calcSt  = null;   // расчёт текущего тура
+let calcTour = null;  // {id,name,pax,currency}
 
 async function loadCalcCat() {
   const [{ data: props }, { data: types }, { data: rates }, { data: vcs }, { data: trates }] = await Promise.all([
-    db.from('property').select('id,name,city,kind,star_category').eq('is_active', true),
-    db.from('room_type').select('id,property_id,name,max_occupancy'),
+    db.from('property').select('id,name,city,kind').eq('is_active', true),
+    db.from('room_type').select('id,property_id,name'),
     db.from('room_rate_public').select('room_type_id,sell_price,sgl_supplement'),
-    db.from('vehicle_class').select('id,name,pax_min,pax_max'),
+    db.from('vehicle_class').select('id,name'),
     db.from('transport_rate_public').select('vehicle_class_id,sell_price_per_unit'),
   ]);
   const pById = {}; (props || []).forEach(p => pById[p.id] = p);
   const rByRt = {}; (rates || []).forEach(r => { if (!rByRt[r.room_type_id]) rByRt[r.room_type_id] = r; });
   const acc = (types || []).filter(t => rByRt[t.id] && pById[t.property_id]).map(t => {
     const p = pById[t.property_id], r = rByRt[t.id], twin = Number(r.sell_price) || 0;
-    return { id: t.id, city: p.city, kind: p.kind, prop: p.name, room: t.name,
-             twin, sgl: twin + (Number(r.sgl_supplement) || 0) };
-  }).sort((a, b) => a.city.localeCompare(b.city, 'ru') || a.prop.localeCompare(b.prop, 'ru'));
+    return { id: t.id, city: p.city, kind: p.kind, prop: p.name, room: t.name, twin, sgl: twin + (Number(r.sgl_supplement) || 0) };
+  });
+  const cities = [...new Set(acc.map(a => a.city))].sort((a, b) => a.localeCompare(b, 'ru'));
   const tByVc = {}; (trates || []).forEach(r => { if (!tByVc[r.vehicle_class_id]) tByVc[r.vehicle_class_id] = r; });
-  const veh = (vcs || []).filter(v => tByVc[v.id]).map(v => ({ id: v.id, name: v.name, day: Number(tByVc[v.id].sell_price_per_unit) || 0 }))
-    .sort((a, b) => a.day - b.day);
-  return { acc, veh };
+  const veh = (vcs || []).filter(v => tByVc[v.id]).map(v => ({ id: v.id, name: v.name, day: Number(tByVc[v.id].sell_price_per_unit) || 0 })).sort((a, b) => a.day - b.day);
+  return { acc, cities, veh };
 }
 
 function newCalc() {
-  return {
-    name: '', profit: 250,
-    stops: [],
-    trans: [], meals: [], entr: {},
-    shows: [], misc: [{ name: 'Вода', sum: 0 }, { name: 'Портеры', sum: 0 }],
-    guide: { fee: 120, transport: 225, mealOn: false, meal: 0, hotelOn: false, hotel: 0 },
-  };
+  return { profit: 250, stops: [], trans: [], misc: [{ name: 'Вода', sum: 0 }, { name: 'Портеры', sum: 0 }] };
 }
 
+// транспорт — по одному городу маршрута (дни = ночи); значения сохраняем по городу
 function calcSync() {
   const s = calcSt;
-  const exT = {}; s.trans.forEach(t => exT[t.city] = t);
-  s.trans = s.stops.map(st => { const e = exT[st.city] || {}; return { city: st.city, days: st.nights, vehId: e.vehId || '', price: e.price || 0 }; });
-  const exM = {}; s.meals.forEach(m => exM[m.city] = m);
-  s.meals = s.stops.map(st => { const e = exM[st.city] || {}; return { city: st.city, days: st.nights, fb: ('fb' in e) ? e.fb : true, price: e.price || 0 }; });
-  const ne = {}; s.stops.forEach(st => { ne[st.city] = s.entr[st.city] || { desc: '', sum: 0 }; }); s.entr = ne;
+  const ex = {}; s.trans.forEach(t => ex[t.city] = t);
+  s.trans = s.stops.filter(st => st.city).map(st => { const e = ex[st.city] || {}; return { city: st.city, days: st.nights, vehId: e.vehId || '', price: e.price || 0 }; });
 }
 
-function accOptions(selId) {
-  const byCity = {};
-  calcCat.acc.forEach(a => { (byCity[a.city] = byCity[a.city] || []).push(a); });
-  let html = '<option value="">— отель / резорт —</option>';
-  Object.keys(byCity).sort((a, b) => a.localeCompare(b, 'ru')).forEach(city => {
-    html += `<optgroup label="${esc(city)}">`;
-    byCity[city].forEach(a => {
-      const tag = a.kind === 'resort' ? ' · резорт' : '';
-      html += `<option value="${a.id}"${a.id === selId ? ' selected' : ''}>${esc(a.prop)} · ${esc(a.room)} — $${a.twin}${tag}</option>`;
-    });
-    html += '</optgroup>';
+function cityOptions(sel) {
+  let h = '<option value="">— город —</option>';
+  calcCat.cities.forEach(c => { h += `<option value="${esc(c)}"${c === sel ? ' selected' : ''}>${esc(c)}</option>`; });
+  return h;
+}
+function accOptionsForCity(city, selId) {
+  let h = '<option value="">— отель / резорт —</option>';
+  if (!city) return h;
+  calcCat.acc.filter(a => a.city === city).forEach(a => {
+    const tag = a.kind === 'resort' ? ' · резорт' : '';
+    h += `<option value="${a.id}"${a.id === selId ? ' selected' : ''}>${esc(a.prop)} · ${esc(a.room)} — $${a.twin}${tag}</option>`;
   });
-  return html;
+  return h;
 }
 function vehOptions(selId) {
-  let html = '<option value="">— класс —</option>';
-  calcCat.veh.forEach(v => { html += `<option value="${v.id}"${v.id === selId ? ' selected' : ''}>${esc(v.name)} — $${v.day}/дн</option>`; });
-  return html;
+  let h = '<option value="">— класс —</option>';
+  calcCat.veh.forEach(v => { h += `<option value="${v.id}"${v.id === selId ? ' selected' : ''}>${esc(v.name)} — $${v.day}/дн</option>`; });
+  return h;
 }
 function suppOf(st) { return Math.round(((st.sgl || 0) - (st.twin || 0) / 2) * (st.nights || 0)); }
 function suppTxt(st) { return (st.sgl || 0) === 0 ? '—' : '+$' + suppOf(st).toLocaleString('ru'); }
@@ -776,35 +763,26 @@ function calcStyle() {
   .wcalc{font-size:13.5px;color:var(--ink)}
   .wcalc .clayout{display:flex;gap:14px;align-items:flex-start}
   .wcalc .cinputs{flex:1;min-width:0;display:flex;flex-direction:column;gap:14px}
-  .wcalc .cresult{width:320px;flex-shrink:0;position:sticky;top:14px}
-  @media (max-width:980px){.wcalc .clayout{flex-direction:column}.wcalc .cresult{width:100%;position:static}}
-  .wcalc .ctbl{width:100%;border-collapse:collapse}
-  .wcalc .ctbl th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line-2);white-space:nowrap}
-  .wcalc .ctbl td{padding:6px 8px;border-bottom:1px solid var(--line-2);vertical-align:middle;font-size:13px}
+  .wcalc .cresult{width:300px;flex-shrink:0;position:sticky;top:14px}
+  @media (max-width:920px){.wcalc .clayout{flex-direction:column}.wcalc .cresult{width:100%;position:static}}
+  .wcalc .card{overflow:hidden}
+  .wcalc .ctbl{width:100%;border-collapse:collapse;table-layout:fixed}
+  .wcalc .ctbl th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);font-weight:600;padding:7px 8px;border-bottom:1px solid var(--line-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .wcalc .ctbl td{padding:5px 8px;border-bottom:1px solid var(--line-2);vertical-align:middle;font-size:13px;overflow:hidden}
   .wcalc .ctbl tr:last-child td{border-bottom:none}
-  .wcalc .ctbl input,.wcalc .ctbl select{font:inherit;font-size:13px;border:1px solid var(--line);border-radius:7px;padding:6px 8px;background:var(--surface);color:var(--ink);width:100%}
+  .wcalc .ctbl input,.wcalc .ctbl select{font:inherit;font-size:13px;border:1px solid var(--line);border-radius:7px;padding:6px 7px;background:var(--surface);color:var(--ink);width:100%}
   .wcalc .ctbl input:focus,.wcalc .ctbl select:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
-  .wcalc .ctbl input.cauto{background:var(--accent-soft);border-color:var(--accent-soft);color:var(--accent-ink);pointer-events:none}
-  .wcalc .cdel{width:24px;height:24px;border:0;background:none;cursor:pointer;color:var(--muted);font-size:16px;line-height:1;border-radius:6px}
+  .wcalc .ctbl input.cauto{background:var(--accent-soft);border-color:var(--accent-soft);color:var(--accent-ink);pointer-events:none;text-align:center}
+  .wcalc .csupp{color:var(--blue);font-weight:600;font-size:12.5px;white-space:nowrap}
+  .wcalc .cdel{width:26px;height:26px;border:0;background:none;cursor:pointer;color:var(--muted);font-size:16px;line-height:1;border-radius:6px}
   .wcalc .cdel:hover{color:var(--red);background:var(--red-bg)}
-  .wcalc .caddrow{padding:9px 14px;border-top:1px solid var(--line-2)}
-  .wcalc .csub{padding:9px 16px;font-size:12px;color:var(--muted)}
-  .wcalc .ctot{padding:9px 16px;font-size:12.5px;font-weight:600;color:var(--blue);border-top:1px solid var(--line-2);background:var(--blue-bg)}
-  .wcalc .cchip{display:inline-flex;align-items:center;font-size:11.5px;font-weight:600;padding:4px 10px;border-radius:20px;cursor:pointer;user-select:none}
-  .wcalc .ctog{width:34px;height:18px;border-radius:9px;border:1px solid var(--line);background:var(--line-2);display:inline-flex;align-items:center;padding:2px;cursor:pointer;flex-shrink:0}
-  .wcalc .ctog.on{background:var(--accent);border-color:var(--accent)}
-  .wcalc .ctdot{width:12px;height:12px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.2);transition:.15s}
-  .wcalc .ctog.on .ctdot{transform:translateX(16px)}
-  .wcalc .cgfields{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:14px 16px}
-  .wcalc .cgf{display:flex;flex-direction:column;gap:5px}
-  .wcalc .cgf label{font-size:12px;color:var(--muted);font-weight:500}
-  .wcalc .cgf input{font:inherit;font-size:13.5px;border:1px solid var(--line);border-radius:8px;padding:7px 9px;background:var(--surface);color:var(--ink);width:100%}
-  .wcalc .cgf input:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
-  .wcalc .cgrow{display:flex;align-items:center;gap:8px}
-  .wcalc .crt{width:100%;border-collapse:collapse}
-  .wcalc .crt th{text-align:right;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:600;padding:8px 12px;border-bottom:1px solid var(--line-2)}
-  .wcalc .crt th:first-child{text-align:center}
-  .wcalc .crt td{padding:7px 12px;border-bottom:1px solid var(--line-2);text-align:right;font-size:13px}
+  .wcalc .caddrow{padding:8px 14px;border-top:1px solid var(--line-2)}
+  .wcalc .csub{padding:8px 14px;font-size:12px;color:var(--muted)}
+  .wcalc .ctot{padding:8px 14px;font-size:12.5px;font-weight:600;color:var(--blue);border-top:1px solid var(--line-2);background:var(--blue-bg)}
+  .wcalc .crt{width:100%;border-collapse:collapse;table-layout:fixed}
+  .wcalc .crt th{text-align:right;font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);font-weight:600;padding:7px 10px;border-bottom:1px solid var(--line-2)}
+  .wcalc .crt th:first-child{text-align:center;width:46px}
+  .wcalc .crt td{padding:6px 10px;border-bottom:1px solid var(--line-2);text-align:right;font-size:13px}
   .wcalc .crt td:first-child{text-align:center;color:var(--muted)}
   .wcalc .crt tr:last-child td{border-bottom:none}
   .wcalc .crt .num{font-family:var(--mono);font-weight:600}
@@ -812,7 +790,7 @@ function calcStyle() {
   .wcalc .crt tr.tourpax td:first-child{color:var(--accent-ink);font-weight:700}
   .wcalc .crt tr.best td{background:var(--green-bg)}
   .wcalc .crt tr.best.tourpax td{background:var(--accent-soft)}
-  .wcalc .crph{text-align:center;padding:24px 12px;color:var(--muted);font-size:12.5px;line-height:1.7}
+  .wcalc .crph{text-align:center;padding:22px 12px;color:var(--muted);font-size:12.5px;line-height:1.7}
   </style>`;
 }
 
@@ -820,44 +798,26 @@ function renderCalc(active) {
   const s = calcSt;
   const totSupp = s.stops.reduce((a, st) => a + suppOf(st), 0);
   const stopRows = s.stops.map((st, i) => `<tr>
-    <td style="min-width:180px"><select class="cAcc" data-i="${i}">${accOptions(st.accId)}</select></td>
-    <td style="width:110px"><input class="cCity" data-i="${i}" value="${esc(st.city || '')}" placeholder="Город"></td>
-    <td style="width:58px"><input type="number" min="1" class="cNig" data-i="${i}" value="${st.nights || 1}"></td>
-    <td style="width:68px"><input type="number" min="0" class="cTwn" data-i="${i}" value="${st.twin || 0}"></td>
-    <td style="width:68px"><input type="number" min="0" class="cSgl" data-i="${i}" value="${st.sgl || 0}"></td>
-    <td style="width:76px;color:var(--blue);font-weight:600" id="csupp-${i}">${suppTxt(st)}</td>
-    <td style="width:30px;text-align:right"><button class="cdel" data-act="delstop" data-i="${i}">×</button></td>
+    <td><select class="cCity" data-i="${i}">${cityOptions(st.city)}</select></td>
+    <td><select class="cAcc" data-i="${i}">${accOptionsForCity(st.city, st.accId)}</select></td>
+    <td><input type="number" min="1" class="cNig" data-i="${i}" value="${st.nights || 1}"></td>
+    <td><input type="number" min="0" class="cTwn" data-i="${i}" value="${st.twin || 0}"></td>
+    <td><input type="number" min="0" class="cSgl" data-i="${i}" value="${st.sgl || 0}"></td>
+    <td class="csupp" id="csupp-${i}">${suppTxt(st)}</td>
+    <td style="text-align:right"><button class="cdel" data-act="delstop" data-i="${i}">×</button></td>
   </tr>`).join('');
   const transRows = s.trans.map((t, i) => `<tr>
-    <td style="width:120px"><input class="cauto" value="${esc(t.city)}" readonly></td>
-    <td style="width:54px"><input class="cauto" value="${t.days}" readonly></td>
+    <td><input class="cauto" value="${esc(t.city)}" readonly></td>
+    <td><input class="cauto" value="${t.days}" readonly></td>
     <td><select class="cTveh" data-i="${i}">${vehOptions(t.vehId)}</select></td>
-    <td style="width:72px"><input type="number" min="0" class="cTpr" data-i="${i}" value="${t.price || 0}"></td>
-    <td style="width:64px" class="hint">${t.price && t.days ? '$' + (t.price * t.days) : '—'}</td>
-  </tr>`).join('');
-  const mealRows = s.meals.map((m, i) => `<tr>
-    <td style="width:120px"><input class="cauto" value="${esc(m.city)}" readonly></td>
-    <td style="width:54px"><input class="cauto" value="${m.days}" readonly></td>
-    <td style="width:112px"><span class="cchip" style="${m.fb ? 'color:var(--accent-ink);background:var(--accent-soft)' : 'color:var(--gray);background:var(--gray-bg)'}" data-act="board" data-i="${i}">${m.fb ? 'Full board' : 'Half board'}</span></td>
-    <td style="width:80px"><input type="number" min="0" class="cMpr" data-i="${i}" value="${m.price || 0}" ${m.fb ? '' : 'disabled'}></td>
-    <td style="width:70px" class="hint">${m.fb ? '×PAX×' + m.days : '$0'}</td>
-  </tr>`).join('');
-  const entrRows = s.stops.map(st => { const e = s.entr[st.city] || { desc: '', sum: 0 }; return `<tr>
-    <td style="width:110px"><input class="cauto" value="${esc(st.city)}" readonly></td>
-    <td><input class="cEd" data-city="${esc(st.city)}" value="${esc(e.desc)}" placeholder="Регистан, Биби-Ханым…"></td>
-    <td style="width:80px"><input type="number" min="0" class="cEs" data-city="${esc(st.city)}" value="${e.sum || ''}" placeholder="0"></td>
-  </tr>`; }).join('');
-  const showRows = s.shows.map((sh, i) => `<tr>
-    <td><input class="cSn" data-i="${i}" value="${esc(sh.name)}" placeholder="Вечер с музыкой…"></td>
-    <td style="width:84px"><input type="number" min="0" class="cSs" data-i="${i}" value="${sh.sum || ''}" placeholder="0"></td>
-    <td style="width:30px;text-align:right"><button class="cdel" data-act="delshow" data-i="${i}">×</button></td>
+    <td><input type="number" min="0" class="cTpr" data-i="${i}" value="${t.price || 0}"></td>
+    <td class="hint" style="text-align:right">${t.price && t.days ? '$' + (t.price * t.days).toLocaleString('ru') : '—'}</td>
   </tr>`).join('');
   const miscRows = s.misc.map((m, i) => `<tr>
     <td><input class="cMn" data-i="${i}" value="${esc(m.name)}" placeholder="Статья…"></td>
-    <td style="width:90px"><input type="number" min="0" class="cMs" data-i="${i}" value="${m.sum || ''}" placeholder="0"></td>
-    <td style="width:30px;text-align:right"><button class="cdel" data-act="delmisc" data-i="${i}">×</button></td>
+    <td><input type="number" min="0" class="cMs" data-i="${i}" value="${m.sum || ''}" placeholder="0"></td>
+    <td style="text-align:right"><button class="cdel" data-act="delmisc" data-i="${i}">×</button></td>
   </tr>`).join('');
-  const g = s.guide;
   const ip = 'style="width:88px;font:inherit;font-size:13.5px;border:1px solid var(--line);border-radius:8px;padding:7px 9px;background:var(--surface);color:var(--ink)"';
 
   $('#calcWrap').innerHTML = calcStyle() + `<div class="wcalc">
@@ -868,8 +828,7 @@ function renderCalc(active) {
         <div style="display:flex;align-items:center;gap:8px"><span class="hint">Прибыль $/чел</span><input type="number" min="0" id="cProfit" value="${s.profit}" ${ip}></div>
         <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
           <span id="cSaveMsg" class="hint"></span>
-          <button class="btn btn--ghost btn--sm" id="cSaveBtn">Сохранить в туре</button>
-          <button class="btn btn--primary btn--sm" id="cCalc">Рассчитать</button>
+          <button class="btn btn--primary btn--sm" id="cSaveBtn">Сохранить в туре</button>
         </div>
       </div>
     </div>
@@ -878,7 +837,10 @@ function renderCalc(active) {
 
         <div class="card">
           <div class="card-head">Маршрут · проживание</div>
-          <table class="ctbl"><thead><tr><th>Отель / резорт</th><th>Город</th><th>Ноч.</th><th>Twin $</th><th>SGL $</th><th>SGL suppl.</th><th></th></tr></thead>
+          <table class="ctbl"><thead><tr>
+            <th style="width:16%">Город</th><th style="width:30%">Отель / резорт</th><th style="width:9%">Ноч.</th>
+            <th style="width:12%">Twin $</th><th style="width:12%">SGL $</th><th style="width:13%">SGL suppl.</th><th style="width:8%"></th>
+          </tr></thead>
           <tbody>${stopRows || `<tr><td colspan="7" class="csub">Добавьте первую локацию маршрута.</td></tr>`}</tbody></table>
           <div class="caddrow"><button class="btn btn--ghost btn--sm" data-act="addstop">+ Добавить локацию</button></div>
           <div class="ctot" id="cTotSupp" style="${totSupp > 0 ? '' : 'display:none'}">Single supplement итого: +$${totSupp.toLocaleString('ru')}</div>
@@ -886,47 +848,17 @@ function renderCalc(active) {
 
         <div class="card">
           <div class="card-head">Транспорт <span class="badge badge--accent">из каталога · по городам</span></div>
-          <table class="ctbl"><thead><tr><th>Город</th><th>Дней</th><th>Класс</th><th>$/день</th><th>Итого</th></tr></thead>
-          <tbody>${transRows || `<tr><td colspan="5" class="csub">—</td></tr>`}</tbody></table>
+          <table class="ctbl"><thead><tr>
+            <th style="width:22%">Город</th><th style="width:12%">Дней</th><th style="width:34%">Класс</th><th style="width:16%">$/день</th><th style="width:16%">Итого</th>
+          </tr></thead>
+          <tbody>${transRows || `<tr><td colspan="5" class="csub">Появится автоматически после добавления локаций.</td></tr>`}</tbody></table>
         </div>
 
         <div class="card">
-          <div class="card-head">Питание <span class="badge badge--accent">по городам</span></div>
-          <table class="ctbl"><thead><tr><th>Город</th><th>Дней</th><th>Тип</th><th>$/чел/день</th><th>Итого</th></tr></thead>
-          <tbody>${mealRows || `<tr><td colspan="5" class="csub">—</td></tr>`}</tbody></table>
-          <div class="csub">Full board: $/чел/день × PAX × дней. Half board = $0.</div>
-        </div>
-
-        <div class="card">
-          <div class="card-head">Билеты <span class="badge badge--accent">по городам</span></div>
-          <table class="ctbl"><thead><tr><th>Город</th><th>Объекты</th><th>$ группа</th></tr></thead>
-          <tbody>${entrRows || `<tr><td colspan="3" class="csub">—</td></tr>`}</tbody></table>
-          <div class="csub">Сумма за группу ÷ PAX.</div>
-        </div>
-
-        <div class="card">
-          <div class="card-head">Шоу / мероприятия</div>
-          <table class="ctbl"><thead><tr><th>Название</th><th>$ группа</th><th></th></tr></thead>
-          <tbody>${showRows || `<tr><td colspan="3" class="csub">—</td></tr>`}</tbody></table>
-          <div class="caddrow"><button class="btn btn--ghost btn--sm" data-act="addshow">+ Мероприятие</button></div>
-        </div>
-
-        <div class="card">
-          <div class="card-head">Гид</div>
-          <div class="cgfields">
-            <div class="cgf"><label>Гонорар $/день</label><input type="number" min="0" id="gFee" value="${g.fee}"></div>
-            <div class="cgf"><label>Транспорт гида $</label><input type="number" min="0" id="gTr" value="${g.transport}"></div>
-            <div class="cgf"><label>Питание $/день</label><div class="cgrow"><div class="ctog ${g.mealOn ? 'on' : ''}" data-act="gmeal"><div class="ctdot"></div></div><input type="number" min="0" id="gMeal" value="${g.meal}" ${g.mealOn ? '' : 'disabled'}></div></div>
-            <div class="cgf"><label>Проживание $/ночь</label><div class="cgrow"><div class="ctog ${g.hotelOn ? 'on' : ''}" data-act="ghotel"><div class="ctdot"></div></div><input type="number" min="0" id="gHotel" value="${g.hotel}" ${g.hotelOn ? '' : 'disabled'}></div></div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-head">Прочие расходы</div>
-          <table class="ctbl"><thead><tr><th>Статья</th><th>$ за группу</th><th></th></tr></thead>
+          <div class="card-head">Прочие расходы <span class="hint" style="font-weight:400">за группу</span></div>
+          <table class="ctbl"><thead><tr><th style="width:60%">Статья</th><th style="width:30%">$ за группу</th><th style="width:10%"></th></tr></thead>
           <tbody>${miscRows}</tbody></table>
           <div class="caddrow"><button class="btn btn--ghost btn--sm" data-act="addmisc">+ Статья</button></div>
-          <div class="csub">Все суммы — за всю группу.</div>
         </div>
 
       </div>
@@ -936,13 +868,14 @@ function renderCalc(active) {
           <div class="card-head">Цена для клиента</div>
           <div class="hint" style="padding:8px 16px 0">Twin/DBL · 1–39 чел · с прибылью</div>
           <div style="max-height:560px;overflow:auto;margin-top:8px"><table class="crt"><thead><tr><th>Чел</th><th>FOC</th><th>без FOC</th><th>Группа</th></tr></thead>
-          <tbody id="cResBody"><tr><td colspan="4" class="crph">Заполните маршрут<br>и нажмите «Рассчитать»</td></tr></tbody></table></div>
+          <tbody id="cResBody"><tr><td colspan="4" class="crph">Добавьте локации<br>маршрута</td></tr></tbody></table></div>
         </div>
       </div>
     </div>
   </div>`;
 
   bindCalc(active);
+  if (s.stops.length) calcCompute();
 }
 
 function bindCalc(active) {
@@ -961,18 +894,17 @@ function bindCalc(active) {
     const act = el.dataset.act, i = +el.dataset.i;
     if (act === 'addstop') { s.stops.push({ accId: '', city: '', nights: 1, twin: 0, sgl: 0 }); reflow(); }
     else if (act === 'delstop') { s.stops.splice(i, 1); reflow(); }
-    else if (act === 'board') { s.meals[i].fb = !s.meals[i].fb; if (!s.meals[i].fb) s.meals[i].price = 0; renderCalc(active); }
-    else if (act === 'addshow') { s.shows.push({ name: '', sum: 0 }); renderCalc(active); }
-    else if (act === 'delshow') { s.shows.splice(i, 1); renderCalc(active); }
     else if (act === 'addmisc') { s.misc.push({ name: '', sum: 0 }); renderCalc(active); }
     else if (act === 'delmisc') { s.misc.splice(i, 1); renderCalc(active); }
-    else if (act === 'gmeal') { s.guide.mealOn = !s.guide.mealOn; if (!s.guide.mealOn) s.guide.meal = 0; renderCalc(active); }
-    else if (act === 'ghotel') { s.guide.hotelOn = !s.guide.hotelOn; if (!s.guide.hotelOn) s.guide.hotel = 0; renderCalc(active); }
   });
 
   root.addEventListener('change', (e) => {
     const t = e.target;
-    if (t.classList.contains('cAcc')) {
+    if (t.classList.contains('cCity')) {
+      const st = s.stops[+t.dataset.i];
+      st.city = t.value; st.accId = ''; st.twin = 0; st.sgl = 0;
+      reflow();
+    } else if (t.classList.contains('cAcc')) {
       const a = accById[t.value]; const st = s.stops[+t.dataset.i];
       if (a) { st.accId = a.id; st.city = a.city; st.twin = a.twin; st.sgl = a.sgl; } else { st.accId = ''; }
       reflow();
@@ -980,33 +912,22 @@ function bindCalc(active) {
       const v = calcCat.veh.find(x => x.id === t.value); const tr = s.trans[+t.dataset.i];
       if (v) { tr.vehId = v.id; tr.price = v.day; } else { tr.vehId = ''; }
       renderCalc(active);
-    } else if (t.classList.contains('cNig') || t.classList.contains('cCity')) {
+    } else if (t.classList.contains('cNig')) {
       reflow();
     }
   });
 
   root.addEventListener('input', (e) => {
-    const t = e.target, v = t.value;
-    if (t.id === 'cProfit') s.profit = +v || 0;
-    else if (t.classList.contains('cCity')) { s.stops[+t.dataset.i].city = v; }
-    else if (t.classList.contains('cNig')) { s.stops[+t.dataset.i].nights = +v || 1; updSupp(+t.dataset.i); }
-    else if (t.classList.contains('cTwn')) { s.stops[+t.dataset.i].twin = +v || 0; updSupp(+t.dataset.i); }
-    else if (t.classList.contains('cSgl')) { s.stops[+t.dataset.i].sgl = +v || 0; updSupp(+t.dataset.i); }
-    else if (t.classList.contains('cTpr')) { s.trans[+t.dataset.i].price = +v || 0; }
-    else if (t.classList.contains('cMpr')) { s.meals[+t.dataset.i].price = +v || 0; }
-    else if (t.classList.contains('cEd')) { (s.entr[t.dataset.city] = s.entr[t.dataset.city] || { desc: '', sum: 0 }).desc = v; }
-    else if (t.classList.contains('cEs')) { (s.entr[t.dataset.city] = s.entr[t.dataset.city] || { desc: '', sum: 0 }).sum = +v || 0; }
-    else if (t.classList.contains('cSn')) { s.shows[+t.dataset.i].name = v; }
-    else if (t.classList.contains('cSs')) { s.shows[+t.dataset.i].sum = +v || 0; }
-    else if (t.classList.contains('cMn')) { s.misc[+t.dataset.i].name = v; }
-    else if (t.classList.contains('cMs')) { s.misc[+t.dataset.i].sum = +v || 0; }
-    else if (t.id === 'gFee') s.guide.fee = +v || 0;
-    else if (t.id === 'gTr') s.guide.transport = +v || 0;
-    else if (t.id === 'gMeal') s.guide.meal = +v || 0;
-    else if (t.id === 'gHotel') s.guide.hotel = +v || 0;
+    const t = e.target, v = t.value, i = +t.dataset.i;
+    if (t.id === 'cProfit') { s.profit = +v || 0; calcCompute(); }
+    else if (t.classList.contains('cNig')) { s.stops[i].nights = +v || 1; updSupp(i); calcCompute(); }
+    else if (t.classList.contains('cTwn')) { s.stops[i].twin = +v || 0; updSupp(i); calcCompute(); }
+    else if (t.classList.contains('cSgl')) { s.stops[i].sgl = +v || 0; updSupp(i); calcCompute(); }
+    else if (t.classList.contains('cTpr')) { s.trans[i].price = +v || 0; calcCompute(); }
+    else if (t.classList.contains('cMn')) { s.misc[i].name = v; }
+    else if (t.classList.contains('cMs')) { s.misc[i].sum = +v || 0; calcCompute(); }
   });
 
-  $('#cCalc').onclick = () => calcCompute();
   $('#cSaveBtn').onclick = () => calcSave();
 }
 
@@ -1014,36 +935,30 @@ function calcCompute() {
   const s = calcSt;
   calcSync();
   const tn = s.stops.reduce((a, st) => a + (st.nights || 0), 0);
-  if (!tn) return;
-  const td = tn + 1;
+  const body = $('#cResBody'); if (!body) return;
+  if (!tn) { body.innerHTML = `<tr><td colspan="4" class="crph">Добавьте локации<br>маршрута</td></tr>`; return; }
   const profit = s.profit || 0;
   const transFixed = s.trans.reduce((a, t) => a + (t.price || 0) * (t.days || 0), 0);
-  const guideFixed = (s.guide.fee || 0) * td + (s.guide.transport || 0)
-    + (s.guide.mealOn ? (s.guide.meal || 0) * td : 0) + (s.guide.hotelOn ? (s.guide.hotel || 0) * tn : 0);
-  const showsFixed = s.shows.reduce((a, x) => a + (x.sum || 0), 0);
   const miscFixed = s.misc.reduce((a, x) => a + (x.sum || 0), 0);
-  const entrFixed = Object.values(s.entr).reduce((a, x) => a + (x.sum || 0), 0);
-  const totalFixed = transFixed + guideFixed + showsFixed + miscFixed + entrFixed;
-  const mealPerPax = s.meals.reduce((a, m) => a + (m.fb ? (m.price || 0) * (m.days || 0) : 0), 0);
+  const totalFixed = transFixed + miscFixed;
   const hotelSgl1 = s.stops.reduce((a, st) => a + (st.sgl || 0) * (st.nights || 0), 0);
   const hotelCost = (pax) => s.stops.reduce((a, st) => a + Math.ceil(pax / 2) * (st.twin || 0) * (st.nights || 0), 0);
 
   let minCpp = Infinity, bestPax = 1;
-  for (let p = 1; p <= 39; p++) { const cpp = (hotelCost(p) + mealPerPax * p + totalFixed) / p + profit; if (cpp < minCpp) { minCpp = cpp; bestPax = p; } }
-
+  for (let p = 1; p <= 39; p++) { const cpp = (hotelCost(p) + totalFixed) / p + profit; if (cpp < minCpp) { minCpp = cpp; bestPax = p; } }
   const tourPax = (calcTour && calcTour.pax) || 0;
+
   let html = '';
   for (let pax = 1; pax <= 39; pax++) {
-    const cost = hotelCost(pax) + mealPerPax * pax + totalFixed;
+    const cost = hotelCost(pax) + totalFixed;
     const noFoc = cost / pax + profit;
-    const foc = noFoc + (hotelSgl1 + mealPerPax * pax + entrFixed) / pax;
+    const foc = noFoc + hotelSgl1 / pax;
     const grp = noFoc * pax;
     const cls = (pax === bestPax ? 'best ' : '') + (pax === tourPax ? 'tourpax' : '');
     html += `<tr class="${cls.trim()}"><td>${pax}</td><td class="num" style="color:var(--accent-ink)">$${Math.round(foc).toLocaleString('ru')}</td><td class="num">$${Math.round(noFoc).toLocaleString('ru')}</td><td class="num" style="color:var(--muted)">$${Math.round(grp).toLocaleString('ru')}</td></tr>`;
   }
-  const body = $('#cResBody'); if (body) body.innerHTML = html;
-  // прокрутка к строке PAX тура
-  const tp = body && body.querySelector('tr.tourpax'); if (tp) tp.scrollIntoView({ block: 'nearest' });
+  body.innerHTML = html;
+  const tp = body.querySelector('tr.tourpax'); if (tp) tp.scrollIntoView({ block: 'nearest' });
 }
 
 async function calcSave() {
@@ -1058,7 +973,7 @@ async function calcSave() {
   } catch (e) {
     if (msg) msg.textContent = '✕ ' + (e.message || 'ошибка');
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Сохранить'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Сохранить в туре'; }
   }
 }
 boot();
