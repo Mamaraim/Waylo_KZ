@@ -757,32 +757,40 @@ function vehOptions(selId) {
 function suppOf(st) { return Math.round(((st.sgl || 0) - (st.twin || 0) / 2) * (st.nights || 0)); }
 function suppTxt(st) { return (st.sgl || 0) === 0 ? '—' : '+$' + suppOf(st).toLocaleString('ru'); }
 
-function calcStyle() {
-  if (document.getElementById('wcalc-style')) return '';
-  return `<style id="wcalc-style">
+function ensureCalcStyle() {
+  if (document.getElementById('wcalc-style')) return;
+  const st = document.createElement('style');
+  st.id = 'wcalc-style';
+  st.textContent = `
   .wcalc{font-size:13.5px;color:var(--ink)}
   .wcalc .clayout{display:flex;gap:14px;align-items:flex-start}
   .wcalc .cinputs{flex:1;min-width:0;display:flex;flex-direction:column;gap:14px}
   .wcalc .cresult{width:300px;flex-shrink:0;position:sticky;top:14px}
-  @media (max-width:920px){.wcalc .clayout{flex-direction:column}.wcalc .cresult{width:100%;position:static}}
+  @media (max-width:760px){.wcalc .clayout{flex-direction:column}.wcalc .cresult{width:100%;position:static}}
   .wcalc .card{overflow:hidden}
-  .wcalc .ctbl{width:100%;border-collapse:collapse;table-layout:fixed}
-  .wcalc .ctbl th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);font-weight:600;padding:7px 8px;border-bottom:1px solid var(--line-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .wcalc .ctbl td{padding:5px 8px;border-bottom:1px solid var(--line-2);vertical-align:middle;font-size:13px;overflow:hidden}
-  .wcalc .ctbl tr:last-child td{border-bottom:none}
-  .wcalc .ctbl input,.wcalc .ctbl select{font:inherit;font-size:13px;border:1px solid var(--line);border-radius:7px;padding:6px 7px;background:var(--surface);color:var(--ink);width:100%}
-  .wcalc .ctbl input:focus,.wcalc .ctbl select:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
-  .wcalc .ctbl input.cauto{background:var(--accent-soft);border-color:var(--accent-soft);color:var(--accent-ink);pointer-events:none;text-align:center}
-  .wcalc .csupp{color:var(--blue);font-weight:600;font-size:12.5px;white-space:nowrap}
-  .wcalc .cdel{width:26px;height:26px;border:0;background:none;cursor:pointer;color:var(--muted);font-size:16px;line-height:1;border-radius:6px}
+  .wcalc .cgr,.wcalc .cghead{display:grid;gap:8px;align-items:center}
+  .wcalc .cgr{padding:7px 14px;border-bottom:1px solid var(--line-2)}
+  .wcalc .cgr:last-of-type{border-bottom:none}
+  .wcalc .cgr>*{min-width:0}
+  .wcalc .cghead{padding:8px 14px;border-bottom:1px solid var(--line-2)}
+  .wcalc .cghead>div{font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .wcalc .acc{grid-template-columns:1.3fr 2.4fr .7fr .95fr .95fr 1fr 28px}
+  .wcalc .gtr{grid-template-columns:1.6fr .8fr 2.4fr 1fr 1fr}
+  .wcalc .ms{grid-template-columns:3fr 1.4fr 28px}
+  .wcalc .cgr input,.wcalc .cgr select{font:inherit;font-size:13px;border:1px solid var(--line);border-radius:7px;padding:7px 8px;background:var(--surface);color:var(--ink);width:100%;min-width:0}
+  .wcalc .cgr input:focus,.wcalc .cgr select:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+  .wcalc .cgr input.cauto{background:var(--accent-soft);border-color:var(--accent-soft);color:var(--accent-ink);pointer-events:none;text-align:center}
+  .wcalc .csupp{color:var(--blue);font-weight:600;font-size:12.5px;text-align:right;white-space:nowrap;overflow:hidden}
+  .wcalc .cright{text-align:right}
+  .wcalc .cdel{width:28px;height:28px;border:0;background:none;cursor:pointer;color:var(--muted);font-size:16px;border-radius:6px;justify-self:end}
   .wcalc .cdel:hover{color:var(--red);background:var(--red-bg)}
-  .wcalc .caddrow{padding:8px 14px;border-top:1px solid var(--line-2)}
-  .wcalc .csub{padding:8px 14px;font-size:12px;color:var(--muted)}
-  .wcalc .ctot{padding:8px 14px;font-size:12.5px;font-weight:600;color:var(--blue);border-top:1px solid var(--line-2);background:var(--blue-bg)}
+  .wcalc .caddrow{padding:10px 14px;border-top:1px solid var(--line-2)}
+  .wcalc .csub{padding:10px 14px;font-size:12px;color:var(--muted)}
+  .wcalc .ctot{padding:9px 14px;font-size:12.5px;font-weight:600;color:var(--blue);border-top:1px solid var(--line-2);background:var(--blue-bg)}
   .wcalc .crt{width:100%;border-collapse:collapse;table-layout:fixed}
   .wcalc .crt th{text-align:right;font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);font-weight:600;padding:7px 10px;border-bottom:1px solid var(--line-2)}
-  .wcalc .crt th:first-child{text-align:center;width:46px}
-  .wcalc .crt td{padding:6px 10px;border-bottom:1px solid var(--line-2);text-align:right;font-size:13px}
+  .wcalc .crt th:first-child{text-align:center;width:42px}
+  .wcalc .crt td{padding:6px 10px;border-bottom:1px solid var(--line-2);text-align:right;font-size:12.5px}
   .wcalc .crt td:first-child{text-align:center;color:var(--muted)}
   .wcalc .crt tr:last-child td{border-bottom:none}
   .wcalc .crt .num{font-family:var(--mono);font-weight:600}
@@ -791,36 +799,38 @@ function calcStyle() {
   .wcalc .crt tr.best td{background:var(--green-bg)}
   .wcalc .crt tr.best.tourpax td{background:var(--accent-soft)}
   .wcalc .crph{text-align:center;padding:22px 12px;color:var(--muted);font-size:12.5px;line-height:1.7}
-  </style>`;
+  `;
+  document.head.appendChild(st);
 }
 
 function renderCalc(active) {
   const s = calcSt;
   const totSupp = s.stops.reduce((a, st) => a + suppOf(st), 0);
-  const stopRows = s.stops.map((st, i) => `<tr>
-    <td><select class="cCity" data-i="${i}">${cityOptions(st.city)}</select></td>
-    <td><select class="cAcc" data-i="${i}">${accOptionsForCity(st.city, st.accId)}</select></td>
-    <td><input type="number" min="1" class="cNig" data-i="${i}" value="${st.nights || 1}"></td>
-    <td><input type="number" min="0" class="cTwn" data-i="${i}" value="${st.twin || 0}"></td>
-    <td><input type="number" min="0" class="cSgl" data-i="${i}" value="${st.sgl || 0}"></td>
-    <td class="csupp" id="csupp-${i}">${suppTxt(st)}</td>
-    <td style="text-align:right"><button class="cdel" data-act="delstop" data-i="${i}">×</button></td>
-  </tr>`).join('');
-  const transRows = s.trans.map((t, i) => `<tr>
-    <td><input class="cauto" value="${esc(t.city)}" readonly></td>
-    <td><input class="cauto" value="${t.days}" readonly></td>
-    <td><select class="cTveh" data-i="${i}">${vehOptions(t.vehId)}</select></td>
-    <td><input type="number" min="0" class="cTpr" data-i="${i}" value="${t.price || 0}"></td>
-    <td class="hint" style="text-align:right">${t.price && t.days ? '$' + (t.price * t.days).toLocaleString('ru') : '—'}</td>
-  </tr>`).join('');
-  const miscRows = s.misc.map((m, i) => `<tr>
-    <td><input class="cMn" data-i="${i}" value="${esc(m.name)}" placeholder="Статья…"></td>
-    <td><input type="number" min="0" class="cMs" data-i="${i}" value="${m.sum || ''}" placeholder="0"></td>
-    <td style="text-align:right"><button class="cdel" data-act="delmisc" data-i="${i}">×</button></td>
-  </tr>`).join('');
+  const stopRows = s.stops.length ? s.stops.map((st, i) => `<div class="cgr acc">
+    <select class="cCity" data-i="${i}">${cityOptions(st.city)}</select>
+    <select class="cAcc" data-i="${i}">${accOptionsForCity(st.city, st.accId)}</select>
+    <input type="number" min="1" class="cNig" data-i="${i}" value="${st.nights || 1}">
+    <input type="number" min="0" class="cTwn" data-i="${i}" value="${st.twin || 0}">
+    <input type="number" min="0" class="cSgl" data-i="${i}" value="${st.sgl || 0}">
+    <span class="csupp" id="csupp-${i}">${suppTxt(st)}</span>
+    <button class="cdel" data-act="delstop" data-i="${i}">×</button>
+  </div>`).join('') : `<div class="csub">Добавьте первую локацию маршрута.</div>`;
+  const transRows = s.trans.length ? s.trans.map((t, i) => `<div class="cgr gtr">
+    <input class="cauto" value="${esc(t.city)}" readonly>
+    <input class="cauto" value="${t.days}" readonly>
+    <select class="cTveh" data-i="${i}">${vehOptions(t.vehId)}</select>
+    <input type="number" min="0" class="cTpr" data-i="${i}" value="${t.price || 0}">
+    <div class="hint cright">${t.price && t.days ? '$' + (t.price * t.days).toLocaleString('ru') : '—'}</div>
+  </div>`).join('') : `<div class="csub">Появится автоматически после добавления локаций.</div>`;
+  const miscRows = s.misc.map((m, i) => `<div class="cgr ms">
+    <input class="cMn" data-i="${i}" value="${esc(m.name)}" placeholder="Статья…">
+    <input type="number" min="0" class="cMs" data-i="${i}" value="${m.sum || ''}" placeholder="0">
+    <button class="cdel" data-act="delmisc" data-i="${i}">×</button>
+  </div>`).join('');
   const ip = 'style="width:88px;font:inherit;font-size:13.5px;border:1px solid var(--line);border-radius:8px;padding:7px 9px;background:var(--surface);color:var(--ink)"';
 
-  $('#calcWrap').innerHTML = calcStyle() + `<div class="wcalc">
+  ensureCalcStyle();
+  $('#calcWrap').innerHTML = `<div class="wcalc">
     <div class="card" style="margin-bottom:14px">
       <div style="display:flex;align-items:center;gap:14px;padding:12px 16px;flex-wrap:wrap">
         <div style="font-weight:600;font-size:14px">Калькулятор тура</div>
@@ -837,27 +847,22 @@ function renderCalc(active) {
 
         <div class="card">
           <div class="card-head">Маршрут · проживание</div>
-          <table class="ctbl"><thead><tr>
-            <th style="width:16%">Город</th><th style="width:30%">Отель / резорт</th><th style="width:9%">Ноч.</th>
-            <th style="width:12%">Twin $</th><th style="width:12%">SGL $</th><th style="width:13%">SGL suppl.</th><th style="width:8%"></th>
-          </tr></thead>
-          <tbody>${stopRows || `<tr><td colspan="7" class="csub">Добавьте первую локацию маршрута.</td></tr>`}</tbody></table>
+          <div class="cghead acc"><div>Город</div><div>Отель / резорт</div><div>Ноч.</div><div>Twin $</div><div>SGL $</div><div>SGL suppl.</div><div></div></div>
+          ${stopRows}
           <div class="caddrow"><button class="btn btn--ghost btn--sm" data-act="addstop">+ Добавить локацию</button></div>
           <div class="ctot" id="cTotSupp" style="${totSupp > 0 ? '' : 'display:none'}">Single supplement итого: +$${totSupp.toLocaleString('ru')}</div>
         </div>
 
         <div class="card">
           <div class="card-head">Транспорт <span class="badge badge--accent">из каталога · по городам</span></div>
-          <table class="ctbl"><thead><tr>
-            <th style="width:22%">Город</th><th style="width:12%">Дней</th><th style="width:34%">Класс</th><th style="width:16%">$/день</th><th style="width:16%">Итого</th>
-          </tr></thead>
-          <tbody>${transRows || `<tr><td colspan="5" class="csub">Появится автоматически после добавления локаций.</td></tr>`}</tbody></table>
+          <div class="cghead gtr"><div>Город</div><div>Дней</div><div>Класс</div><div>$/день</div><div class="cright">Итого</div></div>
+          ${transRows}
         </div>
 
         <div class="card">
           <div class="card-head">Прочие расходы <span class="hint" style="font-weight:400">за группу</span></div>
-          <table class="ctbl"><thead><tr><th style="width:60%">Статья</th><th style="width:30%">$ за группу</th><th style="width:10%"></th></tr></thead>
-          <tbody>${miscRows}</tbody></table>
+          <div class="cghead ms"><div>Статья</div><div>$ за группу</div><div></div></div>
+          ${miscRows}
           <div class="caddrow"><button class="btn btn--ghost btn--sm" data-act="addmisc">+ Статья</button></div>
         </div>
 
@@ -866,7 +871,7 @@ function renderCalc(active) {
       <div class="cresult">
         <div class="card">
           <div class="card-head">Цена для клиента</div>
-          <div class="hint" style="padding:8px 16px 0">Twin/DBL · 1–39 чел · с прибылью</div>
+          <div class="hint" style="padding:8px 14px 0">Twin/DBL · 1–39 чел · с прибылью</div>
           <div style="max-height:560px;overflow:auto;margin-top:8px"><table class="crt"><thead><tr><th>Чел</th><th>FOC</th><th>без FOC</th><th>Группа</th></tr></thead>
           <tbody id="cResBody"><tr><td colspan="4" class="crph">Добавьте локации<br>маршрута</td></tr></tbody></table></div>
         </div>
@@ -958,7 +963,6 @@ function calcCompute() {
     html += `<tr class="${cls.trim()}"><td>${pax}</td><td class="num" style="color:var(--accent-ink)">$${Math.round(foc).toLocaleString('ru')}</td><td class="num">$${Math.round(noFoc).toLocaleString('ru')}</td><td class="num" style="color:var(--muted)">$${Math.round(grp).toLocaleString('ru')}</td></tr>`;
   }
   body.innerHTML = html;
-  const tp = body.querySelector('tr.tourpax'); if (tp) tp.scrollIntoView({ block: 'nearest' });
 }
 
 async function calcSave() {
