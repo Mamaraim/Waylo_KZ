@@ -144,7 +144,7 @@ function navShell(kicker, tabs) {
 /* ── DMC ─────────────────────────────────────────────────────────────────── */
 async function renderDmc(active) {
   if (!state.tab) state.tab = 'catalog';
-  navShell('DMC · ' + active.orgName, [{ id:'catalog', label:'Каталог' }, { id:'requests', label:'Заявки' }, { id:'finance', label:'Финансы' }]);
+  navShell('DMC · ' + active.orgName, [{ id:'catalog', label:'Каталог' }, { id:'requests', label:'Туры' }, { id:'finance', label:'Финансы' }]);
   if (state.tab === 'catalog') dmcCatalog();
   else if (state.tab === 'finance') dmcFinance(active);
   else dmcRequests(active);
@@ -179,36 +179,73 @@ async function dmcCatalog() {
 
 async function dmcRequests(active) {
   const main = $('#main'); if (!main) return;
-  const { data: reqs, error } = await db.from('request').select('id,travel_date,pax_count,status,created_at').order('created_at', { ascending:false });
+  const { data: reqs, error } = await db.from('request')
+    .select('id,name,client_name,destination,start_date,end_date,travel_date,pax_count,currency,status,created_at')
+    .order('created_at', { ascending:false });
   if (error) { main.innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; return; }
   const ids = (reqs || []).map(r => r.id);
   let withLines = new Set();
   if (ids.length) { const { data: ls } = await db.from('request_line').select('request_id').in('request_id', ids); withLines = new Set((ls || []).map(x => x.request_id)); }
-  const emptyDrafts = (reqs || []).filter(r => r.status === 'draft' && !withLines.has(r.id));
+  // «пустые» = черновики без услуг и без названия (мусор старого потока)
+  const emptyDrafts = (reqs || []).filter(r => r.status === 'draft' && !withLines.has(r.id) && !r.name);
+  const dates = (r) => r.start_date ? esc(r.start_date) + (r.end_date ? ' → ' + esc(r.end_date) : '') : '—';
   main.innerHTML = `
-    <div class="page-head"><div><h1>Заявки</h1><div class="sub">Заявка создаётся только после заполнения формы. Пустых черновиков не остаётся.</div></div>
-      <div style="display:flex;gap:8px">${emptyDrafts.length ? `<button class="btn btn--ghost" id="clrDrafts">Очистить пустые (${emptyDrafts.length})</button>` : ''}<button class="btn btn--primary" id="newReq">Новая заявка</button></div></div>
+    <div class="page-head"><div><h1>Туры</h1><div class="sub">Создайте тур — даты, направление и группу. Отели, трансферы и цены добавите внутри.</div></div>
+      <div style="display:flex;gap:8px">${emptyDrafts.length ? `<button class="btn btn--ghost" id="clrDrafts">Очистить пустые (${emptyDrafts.length})</button>` : ''}<button class="btn btn--primary" id="newReq">Новый тур</button></div></div>
     <div id="newReqForm"></div>
     <div class="card">
-      ${reqs.length ? `<table><thead><tr><th>Заявка</th><th>Дата поездки</th><th>Туристов</th><th>Статус</th><th></th></tr></thead><tbody>
-        ${reqs.map(r => `<tr><td class="id-cell">${short(r.id)}</td><td>${esc(r.travel_date||'—')}</td><td class="mono">${r.pax_count??'—'}</td><td>${badge(r.status)}</td><td style="text-align:right;white-space:nowrap"><button class="btn btn--ghost btn--sm openReq" data-id="${r.id}">${state.openReq===r.id?'Скрыть':'Открыть'}</button> <button class="btn btn--ghost btn--sm delReq" data-id="${r.id}" title="Удалить заявку">✕</button></td></tr>`).join('')}
-      </tbody></table>` : `<div class="card-empty">Заявок пока нет — создайте первую.</div>`}
+      ${reqs.length ? `<table><thead><tr><th>Тур</th><th>Клиент / группа</th><th>Направление</th><th>Даты</th><th>PAX</th><th>Статус</th><th></th></tr></thead><tbody>
+        ${reqs.map(r => `<tr>
+          <td><div style="font-weight:600">${esc(r.name || 'Без названия')}</div><div class="id-cell" style="font-size:11px">${short(r.id)}</div></td>
+          <td>${esc(r.client_name || '—')}</td>
+          <td>${esc(r.destination || '—')}</td>
+          <td class="hint">${dates(r)}</td>
+          <td class="mono">${r.pax_count ?? '—'}</td>
+          <td>${badge(r.status)}</td>
+          <td style="text-align:right;white-space:nowrap"><button class="btn btn--ghost btn--sm openReq" data-id="${r.id}">${state.openReq===r.id?'Скрыть':'Открыть'}</button> <button class="btn btn--ghost btn--sm delReq" data-id="${r.id}" title="Удалить тур">✕</button></td>
+        </tr>`).join('')}
+      </tbody></table>` : `<div class="card-empty">Туров пока нет — создайте первый.</div>`}
     </div><div id="reqDetail"></div>`;
   $('#newReq').onclick = () => {
     const box = $('#newReqForm');
-    box.innerHTML = `<div class="card"><div class="card-head">Новая заявка</div>
-      <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;padding:14px">
-        <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;color:#6b7a89">Дата поездки<input type="date" id="nrDate" style="padding:7px 10px;border:1px solid #cdd6de;border-radius:7px;font:inherit"></label>
-        <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;color:#6b7a89">Туристов<input type="number" id="nrPax" min="1" value="2" style="padding:7px 10px;border:1px solid #cdd6de;border-radius:7px;font:inherit;width:90px"></label>
-        <button class="btn btn--primary btn--sm" id="nrCreate">Создать</button>
-        <button class="btn btn--ghost btn--sm" id="nrCancel">Отмена</button>
+    const L = 'style="display:flex;flex-direction:column;gap:5px;font-size:13px;color:#445;font-weight:500"';
+    const I = 'style="padding:9px 11px;border:1px solid #cdd6de;border-radius:8px;font:inherit;background:#fff"';
+    const req = '<span style="color:#c0392b">*</span>';
+    box.innerHTML = `<div class="card">
+      <div class="card-head">Новый тур</div>
+      <div style="padding:10px 18px 0;font-size:13px;color:#6b7a89">Заполните основные данные — услуги, цены и туристов добавите внутри тура.</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 18px;padding:14px 18px 4px">
+        <label ${L}>Название тура ${req}<input id="trName" ${I} placeholder="напр. Экспедиция по Шёлковому пути"></label>
+        <label ${L}>Клиент / название группы<input id="trClient" ${I} placeholder="напр. Acme Corp / Семья Смит"></label>
+        <label ${L} style="grid-column:1/3">Направление<input id="trDest" ${I} placeholder="напр. Самарканд, Бухара, Хива"></label>
+        <label ${L}>Дата начала ${req}<input type="date" id="trStart" ${I}></label>
+        <label ${L}>Дата окончания ${req}<input type="date" id="trEnd" ${I}></label>
+        <label ${L}>PAX (кол-во чел.) ${req}<input type="number" id="trPax" min="1" value="1" ${I}></label>
+        <label ${L}>Базовая валюта<select id="trCur" ${I}><option value="USD">USD (Доллар США)</option><option value="EUR">EUR (Евро)</option><option value="KZT">KZT (Тенге)</option><option value="UZS">UZS (Сум)</option></select></label>
+      </div>
+      <div id="trMsg"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-top:1px solid #e3e9ee;margin-top:8px">
+        <button class="btn btn--ghost btn--sm" id="trCancel">Отмена</button>
+        <button class="btn btn--primary" id="trCreate">Создать тур</button>
       </div></div>`;
-    $('#nrCancel').onclick = () => { box.innerHTML = ''; };
-    $('#nrCreate').onclick = async () => {
-      const date = $('#nrDate').value || null;
-      const pax = parseInt($('#nrPax').value, 10) || 2;
-      const { data, error: e2 } = await db.from('request').insert({ dmc_org_id:active.orgId, status:'draft', travel_date:date, pax_count:pax }).select().single();
-      if (e2) { alert(e2.message); return; }
+    const err = (t) => `<div class="notice notice--err" style="margin:0 18px 10px">${esc(t)}</div>`;
+    $('#trCancel').onclick = () => { box.innerHTML = ''; };
+    $('#trCreate').onclick = async () => {
+      const name = $('#trName').value.trim();
+      const client = $('#trClient').value.trim() || null;
+      const dest = $('#trDest').value.trim() || null;
+      const start = $('#trStart').value || null;
+      const end = $('#trEnd').value || null;
+      const pax = parseInt($('#trPax').value, 10) || 1;
+      const cur = $('#trCur').value || 'USD';
+      if (!name) { $('#trMsg').innerHTML = err('Укажите название тура.'); return; }
+      if (!start || !end) { $('#trMsg').innerHTML = err('Укажите даты начала и окончания.'); return; }
+      if (end < start) { $('#trMsg').innerHTML = err('Дата окончания раньше даты начала.'); return; }
+      const { data, error: e2 } = await db.from('request').insert({
+        dmc_org_id: active.orgId, status: 'draft', name, client_name: client, destination: dest,
+        start_date: start, end_date: end, travel_date: start, pax_count: pax, currency: cur,
+      }).select().single();
+      if (e2) { $('#trMsg').innerHTML = err(e2.message); return; }
       state.openReq = data.id; dmcRequests(active);
     };
   };
@@ -220,7 +257,7 @@ async function dmcRequests(active) {
     dmcRequests(active);
   };
   document.querySelectorAll('.delReq').forEach(b => b.onclick = async () => {
-    if (!confirm('Удалить заявку ' + short(b.dataset.id) + '?')) return;
+    if (!confirm('Удалить тур ' + short(b.dataset.id) + '?')) return;
     const { error: e4 } = await db.from('request').delete().eq('id', b.dataset.id);
     if (e4) { alert(e4.message); return; }
     if (state.openReq === b.dataset.id) state.openReq = null;
@@ -253,13 +290,25 @@ async function dmcFinance(active) {
 
 async function renderReqDetail(active, reqId) {
   const box = $('#reqDetail'); if (!box) return;
+  const { data: tour } = await db.from('request').select('name,client_name,destination,start_date,end_date,pax_count,currency,status').eq('id', reqId).single();
   const { data: lines } = await db.from('request_line').select('*').eq('request_id', reqId).order('created_at');
   let holdsBy = {};
   if ((lines || []).length) {
     const { data: hs } = await db.from('hold').select('*').in('request_line_id', lines.map(l => l.id));
     (hs || []).forEach(h => { (holdsBy[h.request_line_id] ||= []).push(h); });
   }
-  box.innerHTML = `
+  const tHead = tour ? `<div class="card" style="margin-bottom:14px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;padding:16px 18px;flex-wrap:wrap">
+      <div><div style="font-size:17px;font-weight:700">${esc(tour.name || 'Тур')}</div>
+        <div class="hint" style="margin-top:3px">${esc(tour.destination || 'направление не указано')}</div></div>
+      <div style="display:flex;gap:22px;font-size:13px;flex-wrap:wrap">
+        <div><div class="hint">Клиент</div><div style="font-weight:600">${esc(tour.client_name || '—')}</div></div>
+        <div><div class="hint">Даты</div><div style="font-weight:600">${tour.start_date ? esc(tour.start_date) + (tour.end_date ? ' → ' + esc(tour.end_date) : '') : '—'}</div></div>
+        <div><div class="hint">PAX</div><div style="font-weight:600">${tour.pax_count ?? '—'}</div></div>
+        <div><div class="hint">Валюта</div><div style="font-weight:600">${esc(tour.currency || 'USD')}</div></div>
+      </div>
+    </div></div>` : '';
+  box.innerHTML = tHead + `
     <div class="card">
       <div class="card-head">Блоки услуг <span id="addLineSlot"></span>${(lines||[]).length ? ` <button class="btn btn--ghost btn--sm" id="voucherBtn">Ваучер</button>` : ''}</div>
       <div id="lineMsg"></div>
