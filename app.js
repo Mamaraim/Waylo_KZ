@@ -181,19 +181,51 @@ async function dmcRequests(active) {
   const main = $('#main'); if (!main) return;
   const { data: reqs, error } = await db.from('request').select('id,travel_date,pax_count,status,created_at').order('created_at', { ascending:false });
   if (error) { main.innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; return; }
+  const ids = (reqs || []).map(r => r.id);
+  let withLines = new Set();
+  if (ids.length) { const { data: ls } = await db.from('request_line').select('request_id').in('request_id', ids); withLines = new Set((ls || []).map(x => x.request_id)); }
+  const emptyDrafts = (reqs || []).filter(r => r.status === 'draft' && !withLines.has(r.id));
   main.innerHTML = `
-    <div class="page-head"><div><h1>Заявки</h1><div class="sub">Создание заявок, блоки услуг и холды доступности.</div></div>
-      <button class="btn btn--primary" id="newReq">Новая заявка</button></div>
+    <div class="page-head"><div><h1>Заявки</h1><div class="sub">Заявка создаётся только после заполнения формы. Пустых черновиков не остаётся.</div></div>
+      <div style="display:flex;gap:8px">${emptyDrafts.length ? `<button class="btn btn--ghost" id="clrDrafts">Очистить пустые (${emptyDrafts.length})</button>` : ''}<button class="btn btn--primary" id="newReq">Новая заявка</button></div></div>
+    <div id="newReqForm"></div>
     <div class="card">
       ${reqs.length ? `<table><thead><tr><th>Заявка</th><th>Дата поездки</th><th>Туристов</th><th>Статус</th><th></th></tr></thead><tbody>
-        ${reqs.map(r => `<tr><td class="id-cell">${short(r.id)}</td><td>${esc(r.travel_date||'—')}</td><td class="mono">${r.pax_count??'—'}</td><td>${badge(r.status)}</td><td style="text-align:right"><button class="btn btn--ghost btn--sm openReq" data-id="${r.id}">${state.openReq===r.id?'Скрыть':'Открыть'}</button></td></tr>`).join('')}
+        ${reqs.map(r => `<tr><td class="id-cell">${short(r.id)}</td><td>${esc(r.travel_date||'—')}</td><td class="mono">${r.pax_count??'—'}</td><td>${badge(r.status)}</td><td style="text-align:right;white-space:nowrap"><button class="btn btn--ghost btn--sm openReq" data-id="${r.id}">${state.openReq===r.id?'Скрыть':'Открыть'}</button> <button class="btn btn--ghost btn--sm delReq" data-id="${r.id}" title="Удалить заявку">✕</button></td></tr>`).join('')}
       </tbody></table>` : `<div class="card-empty">Заявок пока нет — создайте первую.</div>`}
     </div><div id="reqDetail"></div>`;
-  $('#newReq').onclick = async () => {
-    const { data, error } = await db.from('request').insert({ dmc_org_id:active.orgId, status:'draft', pax_count:2 }).select().single();
-    if (error) { alert(error.message); return; }
-    state.openReq = data.id; dmcRequests(active);
+  $('#newReq').onclick = () => {
+    const box = $('#newReqForm');
+    box.innerHTML = `<div class="card"><div class="card-head">Новая заявка</div>
+      <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;padding:14px">
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;color:#6b7a89">Дата поездки<input type="date" id="nrDate" style="padding:7px 10px;border:1px solid #cdd6de;border-radius:7px;font:inherit"></label>
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:13px;color:#6b7a89">Туристов<input type="number" id="nrPax" min="1" value="2" style="padding:7px 10px;border:1px solid #cdd6de;border-radius:7px;font:inherit;width:90px"></label>
+        <button class="btn btn--primary btn--sm" id="nrCreate">Создать</button>
+        <button class="btn btn--ghost btn--sm" id="nrCancel">Отмена</button>
+      </div></div>`;
+    $('#nrCancel').onclick = () => { box.innerHTML = ''; };
+    $('#nrCreate').onclick = async () => {
+      const date = $('#nrDate').value || null;
+      const pax = parseInt($('#nrPax').value, 10) || 2;
+      const { data, error: e2 } = await db.from('request').insert({ dmc_org_id:active.orgId, status:'draft', travel_date:date, pax_count:pax }).select().single();
+      if (e2) { alert(e2.message); return; }
+      state.openReq = data.id; dmcRequests(active);
+    };
   };
+  const clr = $('#clrDrafts');
+  if (clr) clr.onclick = async () => {
+    if (!confirm('Удалить пустые черновики: ' + emptyDrafts.length + ' шт.?')) return;
+    const { error: e3 } = await db.from('request').delete().in('id', emptyDrafts.map(r => r.id));
+    if (e3) { alert(e3.message); return; }
+    dmcRequests(active);
+  };
+  document.querySelectorAll('.delReq').forEach(b => b.onclick = async () => {
+    if (!confirm('Удалить заявку ' + short(b.dataset.id) + '?')) return;
+    const { error: e4 } = await db.from('request').delete().eq('id', b.dataset.id);
+    if (e4) { alert(e4.message); return; }
+    if (state.openReq === b.dataset.id) state.openReq = null;
+    dmcRequests(active);
+  });
   document.querySelectorAll('.openReq').forEach(b => b.onclick = () => { state.openReq = state.openReq === b.dataset.id ? null : b.dataset.id; dmcRequests(active); });
   if (state.openReq) renderReqDetail(active, state.openReq);
 }
@@ -292,6 +324,7 @@ function lineForm(type, opts, reqId, onAdded) {
     if (!o || !from || !to) { form.innerHTML = `<div class="notice notice--err" style="margin:10px 14px">Заполните поля.</div>`; return; }
     const { error } = await db.from('request_line').insert({ request_id:reqId, supplier_org_id:o.supplier, type, resource_id:o.id, from_date:from, to_date:to, quantity:qty, sell_price:o.sell, confirmation:'pending' });
     if (error) { form.innerHTML = `<div class="notice notice--err" style="margin:10px 14px">${esc(error.message)}</div>`; return; }
+    await db.from('request').update({ status:'submitted' }).eq('id', reqId).eq('status', 'draft');
     onAdded();
   };
 }
