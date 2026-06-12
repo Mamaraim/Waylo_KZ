@@ -144,9 +144,8 @@ function navShell(kicker, tabs) {
 /* ── DMC ─────────────────────────────────────────────────────────────────── */
 async function renderDmc(active) {
   if (!state.tab) state.tab = 'catalog';
-  navShell('DMC · ' + active.orgName, [{ id:'catalog', label:'Каталог' }, { id:'requests', label:'Туры' }, { id:'calc', label:'Калькулятор' }, { id:'finance', label:'Финансы' }]);
+  navShell('DMC · ' + active.orgName, [{ id:'catalog', label:'Каталог' }, { id:'requests', label:'Туры' }, { id:'finance', label:'Финансы' }]);
   if (state.tab === 'catalog') dmcCatalog();
-  else if (state.tab === 'calc') dmcCalculator(active);
   else if (state.tab === 'finance') dmcFinance(active);
   else dmcRequests(active);
 }
@@ -291,15 +290,16 @@ async function dmcFinance(active) {
 
 async function renderReqDetail(active, reqId) {
   const box = $('#reqDetail'); if (!box) return;
-  const { data: tour } = await db.from('request').select('name,client_name,destination,start_date,end_date,pax_count,currency,status').eq('id', reqId).single();
-  const { data: lines } = await db.from('request_line').select('*').eq('request_id', reqId).order('created_at');
-  let holdsBy = {};
-  if ((lines || []).length) {
-    const { data: hs } = await db.from('hold').select('*').in('request_line_id', lines.map(l => l.id));
-    (hs || []).forEach(h => { (holdsBy[h.request_line_id] ||= []).push(h); });
-  }
-  const tHead = tour ? `<div class="card" style="margin-bottom:14px">
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;padding:16px 18px;flex-wrap:wrap">
+  ensureCalcFonts();
+  box.innerHTML = `<div class="center-state">Загрузка тура…</div>`;
+  const { data: tour } = await db.from('request').select('id,name,client_name,destination,start_date,end_date,pax_count,currency,status,calc').eq('id', reqId).single();
+  if (!tour) { box.innerHTML = ''; return; }
+  if (!calcCat) { try { calcCat = await loadCalcCat(); } catch (e) { box.innerHTML = `<div class="notice notice--err" style="margin:10px 0">${esc(e.message)}</div>`; return; } }
+  calcTour = { id: reqId, name: tour.name, pax: tour.pax_count || 1, currency: tour.currency || 'USD' };
+  calcSt = normCalc(tour.calc);
+  calcSync();
+  const tHead = `<div class="card" style="margin-bottom:12px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;padding:14px 18px;flex-wrap:wrap">
       <div><div style="font-size:17px;font-weight:700">${esc(tour.name || 'Тур')}</div>
         <div class="hint" style="margin-top:3px">${esc(tour.destination || 'направление не указано')}</div></div>
       <div style="display:flex;gap:22px;font-size:13px;flex-wrap:wrap">
@@ -308,23 +308,26 @@ async function renderReqDetail(active, reqId) {
         <div><div class="hint">PAX</div><div style="font-weight:600">${tour.pax_count ?? '—'}</div></div>
         <div><div class="hint">Валюта</div><div style="font-weight:600">${esc(tour.currency || 'USD')}</div></div>
       </div>
-    </div></div>` : '';
-  box.innerHTML = tHead + `
-    <div class="card">
-      <div class="card-head">Блоки услуг <span id="addLineSlot"></span>${(lines||[]).length ? ` <button class="btn btn--ghost btn--sm" id="voucherBtn">Ваучер</button>` : ''}</div>
-      <div id="lineMsg"></div>
-      ${(lines||[]).length ? `<table><thead><tr><th>Тип</th><th>Ресурс</th><th>Период</th><th>Кол-во</th><th>Цена</th><th>Подтв.</th><th>Холд</th><th></th></tr></thead><tbody>
-        ${lines.map(l => { const hs = holdsBy[l.id]||[]; const act = hs.filter(h => ['held','confirmed'].includes(h.status)); return `<tr><td>${typeBadge(l.type)}</td><td class="id-cell">${short(l.resource_id)}</td><td class="hint">${esc(l.from_date)} — ${esc(l.to_date)}</td><td class="mono">${l.quantity}</td><td class="price">${money(l.sell_price)}</td><td>${badge(l.confirmation)}</td><td>${act.length?badge(act[0].status):'<span class="hint">нет</span>'}</td><td style="text-align:right">${!act.length?`<button class="btn btn--ghost btn--sm holdBtn" data-id="${l.id}">Захолдить</button>`:''}</td></tr>`; }).join('')}
-      </tbody></table>` : `<div class="card-empty">Добавьте блок из каталога.</div>`}
-    </div>`;
-  document.querySelectorAll('.holdBtn').forEach(b => b.onclick = async () => {
-    const l = lines.find(x => x.id === b.dataset.id);
-    const { error } = await db.rpc('place_hold', { p_request_line:l.id, p_resource_type:l.type==='HOTEL'?'room':'vehicle', p_resource_id:l.resource_id, p_from:l.from_date, p_to:l.to_date, p_quantity:l.quantity, p_idempotency_key:crypto.randomUUID() });
-    if (error) $('#lineMsg').innerHTML = `<div class="notice notice--err" style="margin:10px 14px">${esc(error.message)}</div>`;
-    else renderReqDetail(active, reqId);
-  });
-  const vb = $('#voucherBtn'); if (vb) vb.onclick = () => renderVoucher(reqId, lines);
-  renderAddLine(reqId, () => renderReqDetail(active, reqId));
+    </div></div>`;
+  box.innerHTML = tHead + `<div id="calcWrap"></div>`;
+  renderCalc(active);
+  if (calcSt.stops.length) calcCompute();
+}
+
+// нормализуем сохранённый расчёт (или создаём пустой со структурой по умолчанию)
+function normCalc(raw) {
+  const base = newCalc();
+  if (raw && typeof raw === 'object') {
+    base.profit = (typeof raw.profit === 'number') ? raw.profit : base.profit;
+    base.guide = Object.assign(base.guide, raw.guide || {});
+    base.stops = Array.isArray(raw.stops) ? raw.stops : [];
+    base.trans = Array.isArray(raw.trans) ? raw.trans : [];
+    base.meals = Array.isArray(raw.meals) ? raw.meals : [];
+    base.shows = Array.isArray(raw.shows) ? raw.shows : [];
+    base.misc = Array.isArray(raw.misc) ? raw.misc : base.misc;
+    base.entr = (raw.entr && typeof raw.entr === 'object') ? raw.entr : {};
+  }
+  return base;
 }
 
 function renderAddLine(reqId, onAdded) {
@@ -704,6 +707,7 @@ async function renderPlatform() {
    шоу, прочее → прибыль $/чел → цена для клиента по размеру группы. */
 let calcCat = null;   // каталог из базы: {acc:[...], veh:[...]}
 let calcSt  = null;   // рабочее состояние расчёта
+let calcTour = null;  // тур, к которому привязан расчёт: {id,name,pax,currency}
 
 async function loadCalcCat() {
   const [{ data: props }, { data: types }, { data: rates }, { data: vcs }, { data: trates }] = await Promise.all([
@@ -806,6 +810,9 @@ function calcStyle() {
   .wcalc .crt tr:hover td{background:var(--sf2)}
   .wcalc .crt tr.best td{background:rgba(27,107,74,.08)}
   .wcalc .crt tr.best td:first-child{background:rgba(27,107,74,.16);color:var(--ac2);font-weight:700}
+  .wcalc .crt tr.tourpax td{background:rgba(26,74,140,.10)}
+  .wcalc .crt tr.tourpax td:first-child{background:rgba(26,74,140,.2);color:var(--ac3);font-weight:700}
+  .wcalc .crt tr.tourpax.best td:first-child{background:rgba(26,74,140,.26)}
   .wcalc .cfoc{font-family:"Syne",sans-serif;font-weight:700;color:var(--ac3)}
   .wcalc .cnf{font-family:"Syne",sans-serif;font-weight:700;color:var(--ink)}
   .wcalc .cgp{color:var(--ink3);font-size:10px}
@@ -853,17 +860,6 @@ function calcStyle() {
   </style>`;
 }
 
-async function dmcCalculator(active) {
-  const main = $('#main'); if (!main) return;
-  ensureCalcFonts();
-  main.innerHTML = `<div class="center-state">Загрузка каталога…</div>`;
-  if (!calcCat) { try { calcCat = await loadCalcCat(); } catch (e) { main.innerHTML = `<div class="notice notice--err">${esc(e.message)}</div>`; return; } }
-  if (!calcSt) { calcSt = newCalc(); }
-  if (!calcCat.acc.length) { main.innerHTML = `<div class="notice notice--err" style="margin:10px">В каталоге нет отелей/резортов с ценами. Сначала примените сиды каталога и резортов.</div>`; return; }
-  calcSync();
-  renderCalc(active);
-}
-
 function renderCalc(active) {
   const s = calcSt;
   const totSupp = s.stops.reduce((a, st) => a + suppOf(st), 0);
@@ -907,22 +903,24 @@ function renderCalc(active) {
   </tr>`).join('');
   const g = s.guide;
 
-  $('#main').innerHTML = calcStyle() + `<div class="wcalc">
+  $('#calcWrap').innerHTML = calcStyle() + `<div class="wcalc">
     <div class="ctop">
       <div class="clogo">Waylo<em>·</em>tour</div>
       <div class="csep"></div>
-      <input class="ctname" id="cName" value="${esc(s.name)}" placeholder="Название тура…">
+      <div style="flex:1;min-width:120px;color:#fff;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc((calcTour && calcTour.name) || 'Тур')}</div>
+      <span class="ctlbl">PAX</span><div style="color:#fff;font-size:14px;font-weight:700">${(calcTour && calcTour.pax) || '—'}</div>
       <div class="csep"></div>
       <span class="ctlbl">Прибыль $/чел</span>
       <input type="number" min="0" class="ctprofit" id="cProfit" value="${s.profit}">
       <button class="cgo" id="cCalc">▶ Рассчитать</button>
+      <button class="cgo" id="cSaveBtn" style="background:var(--ac3)">Сохранить</button>
+      <span id="cSaveMsg" style="font-size:10px;color:rgba(255,255,255,.7)"></span>
     </div>
     <div class="cbody">
       <div class="cres">
         <div class="crh"><b>Цена для клиента</b><span>Twin/DBL · 1–39 чел · с прибылью</span></div>
         <div class="crscroll"><table class="crt"><thead><tr><th>Чел</th><th>FOC</th><th>без FOC</th><th>Группа</th></tr></thead>
         <tbody id="cResBody"><tr><td colspan="4" class="crph">Заполните маршрут<br>и нажмите «Рассчитать»</td></tr></tbody></table></div>
-        <div class="csave"><input id="cSaveName" placeholder="Название расчёта…"><button id="cSaveBtn">Сохранить</button></div>
       </div>
       <div class="cins"><div class="cgrid">
 
@@ -1022,8 +1020,7 @@ function bindCalc(active) {
 
   root.addEventListener('input', (e) => {
     const t = e.target, v = t.value;
-    if (t.id === 'cName') s.name = v;
-    else if (t.id === 'cProfit') s.profit = +v || 0;
+    if (t.id === 'cProfit') s.profit = +v || 0;
     else if (t.classList.contains('cCity')) { s.stops[+t.dataset.i].city = v; }
     else if (t.classList.contains('cNig')) { s.stops[+t.dataset.i].nights = +v || 1; updSupp(+t.dataset.i); }
     else if (t.classList.contains('cTwn')) { s.stops[+t.dataset.i].twin = +v || 0; updSupp(+t.dataset.i); }
@@ -1067,29 +1064,34 @@ function calcCompute() {
   let minCpp = Infinity, bestPax = 1;
   for (let p = 1; p <= 39; p++) { const cpp = (hotelCost(p) + mealPerPax * p + totalFixed) / p + profit; if (cpp < minCpp) { minCpp = cpp; bestPax = p; } }
 
+  const tourPax = (calcTour && calcTour.pax) || 0;
   let html = '';
   for (let pax = 1; pax <= 39; pax++) {
     const cost = hotelCost(pax) + mealPerPax * pax + totalFixed;
     const noFoc = cost / pax + profit;
     const foc = noFoc + (hotelSgl1 + mealPerPax * pax + entrFixed) / pax;
     const grp = noFoc * pax;
-    html += `<tr class="${pax === bestPax ? 'best' : ''}"><td>${pax}</td><td class="cfoc">$${Math.round(foc).toLocaleString('ru')}</td><td class="cnf">$${Math.round(noFoc).toLocaleString('ru')}</td><td class="cgp">$${Math.round(grp).toLocaleString('ru')}</td></tr>`;
+    const cls = (pax === bestPax ? 'best ' : '') + (pax === tourPax ? 'tourpax' : '');
+    html += `<tr class="${cls.trim()}"><td>${pax}</td><td class="cfoc">$${Math.round(foc).toLocaleString('ru')}</td><td class="cnf">$${Math.round(noFoc).toLocaleString('ru')}</td><td class="cgp">$${Math.round(grp).toLocaleString('ru')}</td></tr>`;
   }
   const body = $('#cResBody'); if (body) body.innerHTML = html;
+  // прокрутка к строке PAX тура
+  const tp = body && body.querySelector('tr.tourpax'); if (tp) tp.scrollIntoView({ block: 'nearest' });
 }
 
-function calcSave() {
-  const s = calcSt;
-  const name = ($('#cSaveName') && $('#cSaveName').value.trim()) || s.name.trim();
-  if (!name) { alert('Введите название расчёта.'); return; }
+async function calcSave() {
+  if (!calcTour) return;
+  const msg = $('#cSaveMsg');
+  const btn = $('#cSaveBtn'); if (btn) { btn.disabled = true; btn.textContent = 'Сохраняю…'; }
   try {
-    const key = 'waylo_calc_' + Date.now();
-    const list = JSON.parse(localStorage.getItem('waylo_calc_index') || '[]');
-    list.unshift({ key, name, at: new Date().toISOString() });
-    localStorage.setItem('waylo_calc_index', JSON.stringify(list));
-    localStorage.setItem(key, JSON.stringify({ name, state: s }));
-    if ($('#cSaveName')) $('#cSaveName').value = '';
-    alert('Расчёт «' + name + '» сохранён.');
-  } catch (e) { alert('Не удалось сохранить: ' + e.message); }
+    calcSync();
+    const { error } = await db.from('request').update({ calc: calcSt }).eq('id', calcTour.id);
+    if (error) throw error;
+    if (msg) { msg.textContent = '✓ сохранено в туре'; setTimeout(() => { if (msg) msg.textContent = ''; }, 3000); }
+  } catch (e) {
+    if (msg) msg.textContent = '✕ ' + (e.message || 'ошибка');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Сохранить'; }
+  }
 }
 boot();
