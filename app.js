@@ -499,92 +499,234 @@ function ensureShaStyle() {
   document.head.appendChild(st);
 }
 
-let shaFrom = null; // начало окна шахматки (YYYY-MM-DD)
+function ensureSha2Style() {
+  if (document.getElementById('sha2-style')) return;
+  const st = document.createElement('style');
+  st.id = 'sha2-style';
+  st.textContent = `
+  .sha2-wrap{overflow:auto;max-height:72vh;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+  .sha2{border-collapse:separate;border-spacing:0;font-size:12px;width:max-content}
+  .sha2 th,.sha2 td{border-right:1px solid var(--line-2);border-bottom:1px solid var(--line-2);padding:3px 6px;text-align:center;white-space:nowrap;height:30px;box-sizing:border-box}
+  .sha2 thead th{position:sticky;background:var(--bg);font-size:10px;color:var(--muted);font-weight:600;line-height:1.15}
+  .sha2 thead tr.grp th{top:0;height:26px;background:var(--accent-soft);color:var(--accent-ink);font-weight:700;font-size:12px}
+  .sha2 thead tr.sub th{top:26px}
+  .sha2 .dh{position:sticky;left:0;z-index:2;background:var(--surface);text-align:left;min-width:124px;padding:4px 10px;font-weight:600;box-shadow:1px 0 0 var(--line)}
+  .sha2 thead .dh{z-index:5;background:var(--bg)}
+  .sha2 thead tr.grp .dh{z-index:6;background:var(--bg)}
+  .sha2 tr.we td{background:#fafbfb}
+  .sha2 tr.we td.dh{color:var(--red);background:#f6f7f8}
+  .sha2 .wd{color:var(--muted);font-weight:400;font-size:10px;margin-left:5px}
+  .sha2 .cl{cursor:pointer;font-size:13px;width:36px;user-select:none}
+  .sha2 .avinp{width:50px;text-align:center;font:inherit;font-family:var(--mono);font-weight:600;border:1px solid transparent;border-radius:6px;padding:3px 2px;background:transparent;color:var(--ink)}
+  .sha2 .avinp:hover{border-color:var(--line)}
+  .sha2 .avinp:focus{border-color:var(--accent);outline:none;background:var(--surface)}
+  .sha2 .av.man .avinp{background:var(--green-bg);color:var(--green)}
+  .sha2 .defrst{color:var(--muted);cursor:pointer;border-bottom:1px dotted var(--muted);font-family:var(--mono)}
+  .sha2 .fr{font-family:var(--mono);font-weight:700}
+  .sha2 .fr.ok{color:var(--green)}
+  .sha2 .fr.zero{background:#fdf4d4;color:var(--amber)}
+  .sha2 .fr.over{background:var(--red-bg);color:var(--red)}
+  .sha2 .fr.closed{background:#eef0f2;color:var(--muted)}
+  .sha2 .bk{font-family:var(--mono);color:var(--ink-2)}
+  .sha2 .cn{font-family:var(--mono);color:var(--blue)}
+  .sha2-leg{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin:12px 2px 0}
+  .sha2-leg span{display:inline-flex;align-items:center;gap:6px}
+  .sha2-leg i{width:13px;height:13px;border-radius:3px;display:inline-block;border:1px solid var(--line-2)}
+  .deftbl{border-collapse:collapse;font-size:13px}
+  .deftbl th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);font-weight:600;padding:6px 12px;border-bottom:1px solid var(--line-2)}
+  .deftbl td{padding:6px 12px;border-bottom:1px solid var(--line-2)}
+  .deftbl .definp{width:90px;font:inherit;border:1px solid var(--line);border-radius:7px;padding:6px 8px;background:var(--surface);color:var(--ink);font-family:var(--mono)}
+  `;
+  document.head.appendChild(st);
+}
+
+let shaFrom = null, shaTo = null, shaProp = null;
+
+const RU_MON = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+const RU_WD = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 
 async function hotelAvail(active) {
   const main = $('#main'); if (!main) return;
-  ensureShaStyle();
-  const N = 21;
-  if (!shaFrom) shaFrom = new Date().toISOString().slice(0, 10);
-  const fromD = shaFrom, toD = addDays(shaFrom, N);
-  const days = []; for (let i = 0; i < N; i++) days.push(addDays(shaFrom, i));
+  ensureSha2Style();
 
-  const { data: props } = await db.from('property').select('id,name').eq('org_id', active.orgId);
-  const ids = (props || []).map(p => p.id);
-  const { data: ts } = ids.length ? await db.from('room_type').select('id,name,property_id').in('property_id', ids) : { data: [] };
-  const pById = Object.fromEntries((props || []).map(p => [p.id, p.name]));
-  const types = (ts || []).map(t => ({ id: t.id, label: `${pById[t.property_id]} · ${t.name}` })).sort((a, b) => a.label.localeCompare(b.label, 'ru'));
-  const tIds = types.map(t => t.id);
+  const { data: props } = await db.from('property').select('id,name').eq('org_id', active.orgId).order('name');
+  const propList = props || [];
+  if (!propList.length) { main.innerHTML = `<div class="page-head"><div><h1>Доступность</h1></div></div><div class="card"><div class="card-empty">Нет объектов. Добавьте отель/резорт в каталоге.</div></div>`; return; }
+  if (!shaProp || !propList.some(p => p.id === shaProp)) shaProp = propList[0].id;
+
+  const today = new Date().toISOString().slice(0, 10);
+  if (!shaFrom) shaFrom = today;
+  if (!shaTo) shaTo = addDays(today, 29);
+  if (shaTo < shaFrom) shaTo = shaFrom;
+  // окно дат (с запасом по производительности)
+  const days = []; let cur = shaFrom; let guard = 0;
+  while (cur <= shaTo && guard < 92) { days.push(cur); cur = addDays(cur, 1); guard++; }
+  const lastDay = days[days.length - 1];
+
+  const { data: ts } = await db.from('room_type').select('id,name,default_availability').eq('property_id', shaProp).order('name');
+  const rts = ts || [];
+  const rtIds = rts.map(r => r.id);
+  const defOf = {}; rts.forEach(r => defOf[r.id] = r.default_availability || 0);
 
   const [{ data: al }, { data: hd }] = await Promise.all([
-    tIds.length ? db.from('room_allotment').select('room_type_id,day,quantity').in('room_type_id', tIds).gte('day', fromD).lt('day', toD) : Promise.resolve({ data: [] }),
-    tIds.length ? db.from('hold').select('resource_id,day,quantity,status').eq('resource_type', 'room').in('resource_id', tIds).gte('day', fromD).lt('day', toD).in('status', ['held', 'confirmed']) : Promise.resolve({ data: [] }),
+    rtIds.length ? db.from('room_allotment').select('room_type_id,day,quantity,closed').in('room_type_id', rtIds).gte('day', shaFrom).lte('day', lastDay) : Promise.resolve({ data: [] }),
+    rtIds.length ? db.from('hold').select('resource_id,day,quantity,status,expires_at').eq('resource_type', 'room').in('resource_id', rtIds).gte('day', shaFrom).lte('day', lastDay) : Promise.resolve({ data: [] }),
   ]);
-  const allot = {}; (al || []).forEach(a => { allot[a.room_type_id + '|' + a.day] = a.quantity; });
-  const held = {}, conf = {};
-  (hd || []).forEach(h => { const k = h.resource_id + '|' + h.day; if (h.status === 'confirmed') conf[k] = (conf[k] || 0) + h.quantity; else held[k] = (held[k] || 0) + h.quantity; });
+  const allot = {}; (al || []).forEach(a => { allot[a.room_type_id + '|' + a.day] = { quantity: a.quantity, closed: a.closed }; });
+  const held = {}, conf = {}, canc = {};
+  const now = Date.now();
+  (hd || []).forEach(h => {
+    const k = h.resource_id + '|' + h.day;
+    if (h.status === 'confirmed') conf[k] = (conf[k] || 0) + h.quantity;
+    else if (h.status === 'held') { if (!h.expires_at || new Date(h.expires_at).getTime() > now) held[k] = (held[k] || 0) + h.quantity; }
+    else if (h.status === 'released' || h.status === 'expired') canc[k] = (canc[k] || 0) + h.quantity;
+  });
 
-  const wd = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
-  const headCells = days.map(d => {
-    const dt = new Date(d + 'T00:00:00Z'); const g = dt.getUTCDay(); const we = (g === 0 || g === 6);
-    return `<th class="${we ? 'we' : ''}">${dt.getUTCDate()}<br><span class="wd">${wd[g]}</span></th>`;
+  function cellState(rtId, day) {
+    const k = rtId + '|' + day, a = allot[k];
+    const base = a ? (a.closed ? 0 : a.quantity) : (defOf[rtId] || 0);
+    const h = held[k] || 0, c = conf[k] || 0, booked = h + c, free = Math.max(0, base - booked);
+    const closed = !!(a && a.closed);
+    let cls, txt;
+    if (closed) { cls = 'fr closed'; txt = '—'; }
+    else if (booked > base) { cls = 'fr over'; txt = free; }
+    else if (free === 0) { cls = 'fr zero'; txt = 0; }
+    else { cls = 'fr ok'; txt = free; }
+    return { a, base, h, c, booked, free, closed, cls, txt, man: !!a, avVal: a ? a.quantity : (defOf[rtId] || 0) };
+  }
+  function recompute(rtId, day) {
+    const k = rtId + '|' + day, s = cellState(rtId, day);
+    const cc = document.getElementById('c_' + k);
+    if (cc) { cc.textContent = s.closed ? '✕' : '●'; cc.style.color = s.closed ? 'var(--red)' : 'var(--green)'; cc.title = s.closed ? 'Закрыто — нажмите, чтобы открыть' : 'Открыто — нажмите, чтобы закрыть'; }
+    const aw = document.getElementById('aw_' + k); if (aw) aw.className = 'av' + (s.man ? ' man' : '');
+    const ai = document.getElementById('a_' + k); if (ai && document.activeElement !== ai) ai.value = s.avVal;
+    const fc = document.getElementById('f_' + k); if (fc) { fc.className = s.cls; fc.textContent = s.txt; fc.title = `Свободно ${s.free} из ${s.base} · холд ${s.h} · подтв ${s.c}`; }
+    const bc = document.getElementById('b_' + k); if (bc) bc.textContent = s.c || '';
+  }
+  async function setAv(rtId, day, qty) {
+    const k = rtId + '|' + day, prev = allot[k], closed = prev ? prev.closed : false;
+    const { error } = await db.from('room_allotment').upsert({ room_type_id: rtId, day, quantity: qty, closed }, { onConflict: 'room_type_id,day' });
+    if (error) { setMsg(error.message, true); return; }
+    allot[k] = { quantity: qty, closed }; recompute(rtId, day); setMsg('сохранено', false);
+  }
+  async function toggleClose(rtId, day) {
+    const k = rtId + '|' + day, prev = allot[k];
+    const qty = prev ? prev.quantity : (defOf[rtId] || 0), closed = prev ? !prev.closed : true;
+    const { error } = await db.from('room_allotment').upsert({ room_type_id: rtId, day, quantity: qty, closed }, { onConflict: 'room_type_id,day' });
+    if (error) { setMsg(error.message, true); return; }
+    allot[k] = { quantity: qty, closed }; recompute(rtId, day); setMsg(closed ? 'дата закрыта' : 'дата открыта', false);
+  }
+  async function resetDef(rtId, day) {
+    const k = rtId + '|' + day;
+    const { error } = await db.from('room_allotment').delete().eq('room_type_id', rtId).eq('day', day);
+    if (error) { setMsg(error.message, true); return; }
+    delete allot[k]; recompute(rtId, day); setMsg('сброшено к дефолту', false);
+  }
+  function setMsg(t, err) { const m = $('#shaMsg'); if (m) { m.textContent = (err ? '✕ ' : '✓ ') + t; m.style.color = err ? 'var(--red)' : 'var(--muted)'; if (!err) setTimeout(() => { if (m) m.textContent = ''; }, 2500); } }
+
+  const grpHead = days.length ? new Date(shaFrom + 'T00:00:00Z').getUTCFullYear() : '';
+  const subHead = `<th>Закр/Откр</th><th>Доступно</th><th>Дефолт</th><th>Свободно</th><th>Брони</th><th>Отмены</th>`;
+  const bodyRows = days.map(d => {
+    const dt = new Date(d + 'T00:00:00Z'), g = dt.getUTCDay(), we = (g === 0 || g === 6);
+    const dl = `${dt.getUTCDate()} ${RU_MON[dt.getUTCMonth()]}<span class="wd">${RU_WD[g]}</span>`;
+    const cells = rts.map(rt => {
+      const k = rt.id + '|' + d, s = cellState(rt.id, d);
+      return `<td class="cl" id="c_${k}" data-rt="${rt.id}" data-day="${d}" title="${s.closed ? 'Закрыто — открыть' : 'Открыто — закрыть'}" style="color:${s.closed ? 'var(--red)' : 'var(--green)'}">${s.closed ? '✕' : '●'}</td>`
+        + `<td class="av${s.man ? ' man' : ''}" id="aw_${k}"><input type="number" min="0" class="avinp" id="a_${k}" data-rt="${rt.id}" data-day="${d}" value="${s.avVal}"></td>`
+        + `<td><span class="defrst" data-rt="${rt.id}" data-day="${d}" title="сбросить к дефолту">${defOf[rt.id] || 0}</span></td>`
+        + `<td class="${s.cls}" id="f_${k}" title="Свободно ${s.free} из ${s.base} · холд ${s.h} · подтв ${s.c}">${s.txt}</td>`
+        + `<td class="bk" id="b_${k}">${s.c || ''}</td>`
+        + `<td class="cn" id="n_${k}">${canc[k] || ''}</td>`;
+    }).join('');
+    return `<tr class="${we ? 'we' : ''}"><td class="dh">${dl}</td>${cells}</tr>`;
   }).join('');
 
-  const cell = (rtId, d) => {
-    const k = rtId + '|' + d, total = allot[k];
-    if (total == null) return `<td class="cell" style="background:#f4f5f6;color:var(--muted)" title="Аллотмент не задан">·</td>`;
-    const h = held[k] || 0, c = conf[k] || 0, free = total - h - c;
-    let bg, col;
-    if (free <= 0) { bg = 'var(--red-bg)'; col = 'var(--red)'; }
-    else if (h + c > 0) { bg = 'var(--amber-bg)'; col = 'var(--amber)'; }
-    else { bg = 'var(--green-bg)'; col = 'var(--green)'; }
-    return `<td class="cell" style="background:${bg};color:${col}" title="Свободно ${free} из ${total} · холд ${h} · подтв ${c}">${free}</td>`;
-  };
-
-  const rows = types.length ? types.map(t => `<tr><td class="rh">${esc(t.label)}</td>${days.map(d => cell(t.id, d)).join('')}</tr>`).join('')
-    : `<tr><td class="rh" colspan="${N + 1}" style="color:var(--muted);font-weight:400">Нет типов номеров. Добавьте их в каталоге.</td></tr>`;
-
   main.innerHTML = `
-    <div class="page-head"><div><h1>Доступность</h1><div class="sub">Шахматка номеров: сколько свободно по датам. Цвет — свободно / есть холды / занято.</div></div></div>
-    <div class="card"><div class="card-head">Выделить номера под Waylo</div><div style="padding:14px">
-      <div class="row">
-        <div class="field" style="min-width:240px"><label>Номер</label><select class="input" id="avRt"><option value="">— выбрать —</option>${types.map(t => `<option value="${t.id}">${esc(t.label)}</option>`).join('')}</select></div>
-        <div class="field"><label>С даты</label><input type="date" id="avFrom" value="${fromD}"></div>
-        <div class="field"><label>По дату (вкл.)</label><input type="date" id="avTo" value="${days[N - 1]}"></div>
-        <div class="field" style="width:90px"><label>Кол-во</label><input type="number" min="0" value="10" id="avQty"></div>
-        <button class="btn btn--primary btn--sm" id="avSave">Выделить</button>
-      </div><div class="hint" style="margin-top:6px">Выставит количество на каждый день диапазона (перезапишет существующее).</div><div id="avMsg"></div></div></div>
-    <div class="card"><div class="card-head">Шахматка · ${fromD} — ${days[N - 1]}</div><div style="padding:14px">
+    <div class="page-head"><div><h1>Доступность</h1><div class="sub">Дефолт на категорию + календарь-шахматка: правьте число прямо в ячейке, закрывайте даты, видьте брони.</div></div></div>
+
+    <div class="card"><div class="card-head">Объект и доступность по умолчанию</div><div style="padding:14px">
+      ${propList.length > 1 ? `<div class="field" style="max-width:340px;margin-bottom:14px"><label>Объект</label><select class="input" id="shaProp">${propList.map(p => `<option value="${p.id}" ${p.id === shaProp ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>` : ''}
+      ${rts.length ? `<table class="deftbl"><thead><tr><th>Категория номеров</th><th>Доступность по умолчанию</th></tr></thead><tbody>
+        ${rts.map(rt => `<tr><td>${esc(rt.name)}</td><td><input type="number" min="0" class="definp" data-rt="${rt.id}" value="${defOf[rt.id] || 0}"></td></tr>`).join('')}
+      </tbody></table>
+      <div style="margin-top:12px;display:flex;gap:10px;align-items:center"><button class="btn btn--primary btn--sm" id="defSave">Сохранить дефолты</button><span id="defMsg" class="hint"></span></div>
+      <div class="hint" style="margin-top:6px">Дефолт применяется к дням, где доступность не задана вручную в календаре.</div>` : `<div class="card-empty">Нет категорий номеров у объекта.</div>`}
+    </div></div>
+
+    <div class="card"><div class="card-head">Календарь · ${esc(propList.find(p => p.id === shaProp).name)}</div><div style="padding:14px">
       <div class="sha-nav">
-        <button class="btn btn--ghost btn--sm" id="shaPrev">‹ Раньше</button>
-        <button class="btn btn--ghost btn--sm" id="shaToday">Сегодня</button>
-        <button class="btn btn--ghost btn--sm" id="shaNext">Позже ›</button>
-        <input type="date" id="shaJump" value="${fromD}" style="margin-left:6px">
+        <span class="hint">Период с</span><input type="date" id="shaF" value="${shaFrom}">
+        <span class="hint">по</span><input type="date" id="shaT" value="${shaTo}">
+        <button class="btn btn--primary btn--sm" id="shaShow">Показать</button>
+        <button class="btn btn--ghost btn--sm" id="grpBtn" style="margin-left:auto">Групповая операция</button>
+        <span id="shaMsg" class="hint"></span>
       </div>
-      <div class="sha-wrap"><table class="sha"><thead><tr><th class="rh">Тип номера</th>${headCells}</tr></thead><tbody>${rows}</tbody></table></div>
-      <div class="sha-leg">
-        <span><i style="background:var(--green-bg)"></i>свободно</span>
-        <span><i style="background:var(--amber-bg)"></i>есть холды</span>
-        <span><i style="background:var(--red-bg)"></i>занято</span>
-        <span><i style="background:#f4f5f6"></i>не задано</span>
-        <span>число в ячейке = свободных номеров</span>
+      <div id="grpPanel" style="display:none;border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px;background:var(--bg)">
+        <div class="row" style="align-items:flex-end">
+          <div class="field" style="min-width:200px"><label>Категория</label><select class="input" id="grpRt"><option value="">Все категории</option>${rts.map(rt => `<option value="${rt.id}">${esc(rt.name)}</option>`).join('')}</select></div>
+          <div class="field"><label>С даты</label><input type="date" id="grpFrom" value="${shaFrom}"></div>
+          <div class="field"><label>По дату</label><input type="date" id="grpTo" value="${shaTo}"></div>
+          <div class="field" style="min-width:170px"><label>Действие</label><select class="input" id="grpAct"><option value="set">Задать доступно</option><option value="close">Закрыть продажи</option><option value="open">Открыть продажи</option></select></div>
+          <div class="field" style="width:90px" id="grpNWrap"><label>Кол-во</label><input type="number" min="0" value="10" id="grpN"></div>
+          <button class="btn btn--primary btn--sm" id="grpApply">Применить</button>
+          <button class="btn btn--ghost btn--sm" id="grpCancel">Закрыть</button>
+        </div><div id="grpMsg"></div>
       </div>
+      ${rts.length ? `<div class="sha2-wrap"><table class="sha2">
+        <thead>
+          <tr class="grp"><th class="dh" rowspan="2">${grpHead}</th>${rts.map(rt => `<th colspan="6">${esc(rt.name)}</th>`).join('')}</tr>
+          <tr class="sub">${rts.map(() => subHead).join('')}</tr>
+        </thead>
+        <tbody>${bodyRows}</tbody>
+      </table></div>
+      <div class="sha2-leg">
+        <span><i style="background:var(--green-bg)"></i>изменено вручную</span>
+        <span><i style="background:#fdf4d4"></i>доступность исчерпана</span>
+        <span><i style="background:var(--red-bg)"></i>overbooking</span>
+        <span><i style="background:#eef0f2"></i>закрыто</span>
+        <span>● открыто / ✕ закрыто · «Свободно» = к брони · «Брони» = подтверждено</span>
+      </div>` : ''}
     </div></div>`;
 
-  $('#avSave').onclick = async () => {
-    const rt = $('#avRt').value, f = $('#avFrom').value, tt = $('#avTo').value, qty = Number($('#avQty').value || 0);
-    if (!rt || !f || !tt) { $('#avMsg').innerHTML = `<div class="notice notice--err">Выберите номер и обе даты.</div>`; return; }
-    if (f > tt) { $('#avMsg').innerHTML = `<div class="notice notice--err">«С даты» позже, чем «по дату».</div>`; return; }
-    const batch = []; let cur = f; let guard = 0;
-    while (cur <= tt && guard < 400) { batch.push({ room_type_id: rt, day: cur, quantity: qty }); cur = addDays(cur, 1); guard++; }
-    const { error } = await db.from('room_allotment').upsert(batch, { onConflict: 'room_type_id,day' });
-    if (error) $('#avMsg').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`;
+  // ── обработчики ──
+  const propSel = $('#shaProp'); if (propSel) propSel.onchange = (e) => { shaProp = e.target.value; hotelAvail(active); };
+  $('#shaShow').onclick = () => { const f = $('#shaF').value, t = $('#shaT').value; if (f) shaFrom = f; if (t) shaTo = t; hotelAvail(active); };
+  const ds = $('#defSave'); if (ds) ds.onclick = async () => {
+    const ups = [...document.querySelectorAll('.definp')].map(i => db.from('room_type').update({ default_availability: Math.max(0, parseInt(i.value || '0', 10)) }).eq('id', i.dataset.rt));
+    const res = await Promise.all(ups); const err = res.find(r => r.error);
+    if (err) $('#defMsg').innerHTML = `<span style="color:var(--red)">${esc(err.error.message)}</span>`;
     else hotelAvail(active);
   };
-  $('#shaPrev').onclick = () => { shaFrom = addDays(shaFrom, -N); hotelAvail(active); };
-  $('#shaNext').onclick = () => { shaFrom = addDays(shaFrom, N); hotelAvail(active); };
-  $('#shaToday').onclick = () => { shaFrom = new Date().toISOString().slice(0, 10); hotelAvail(active); };
-  $('#shaJump').onchange = (e) => { if (e.target.value) { shaFrom = e.target.value; hotelAvail(active); } };
+  document.querySelectorAll('.avinp').forEach(i => { i.onchange = () => setAv(i.dataset.rt, i.dataset.day, Math.max(0, parseInt(i.value || '0', 10))); });
+  document.querySelectorAll('.cl').forEach(c => { c.onclick = () => toggleClose(c.dataset.rt, c.dataset.day); });
+  document.querySelectorAll('.defrst').forEach(s => { s.onclick = () => resetDef(s.dataset.rt, s.dataset.day); });
+
+  const grpBtn = $('#grpBtn'); if (grpBtn) {
+    const panel = $('#grpPanel');
+    const syncN = () => { const w = $('#grpNWrap'); if (w) w.style.display = $('#grpAct').value === 'set' ? '' : 'none'; };
+    grpBtn.onclick = () => { panel.style.display = panel.style.display === 'none' ? 'block' : 'none'; syncN(); };
+    $('#grpCancel').onclick = () => { panel.style.display = 'none'; };
+    $('#grpAct').onchange = syncN;
+    $('#grpApply').onclick = async () => {
+      const rt = $('#grpRt').value, f = $('#grpFrom').value, t = $('#grpTo').value, act = $('#grpAct').value, n = Math.max(0, parseInt($('#grpN').value || '0', 10));
+      if (!f || !t || f > t) { $('#grpMsg').innerHTML = `<div class="notice notice--err">Проверьте даты.</div>`; return; }
+      const targetRts = rt ? [rt] : rtIds;
+      const rng = []; let c2 = f, g2 = 0; while (c2 <= t && g2 < 400) { rng.push(c2); c2 = addDays(c2, 1); g2++; }
+      let batch = [];
+      if (act === 'set') {
+        targetRts.forEach(r => rng.forEach(d => batch.push({ room_type_id: r, day: d, quantity: n, closed: false })));
+      } else {
+        // закрыть/открыть — сохранить существующее количество (или дефолт)
+        const { data: ex } = await db.from('room_allotment').select('room_type_id,day,quantity').in('room_type_id', targetRts).gte('day', f).lte('day', t);
+        const exMap = {}; (ex || []).forEach(e => exMap[e.room_type_id + '|' + e.day] = e.quantity);
+        const closed = act === 'close';
+        targetRts.forEach(r => rng.forEach(d => batch.push({ room_type_id: r, day: d, quantity: (exMap[r + '|' + d] != null ? exMap[r + '|' + d] : (defOf[r] || 0)), closed })));
+      }
+      const { error } = await db.from('room_allotment').upsert(batch, { onConflict: 'room_type_id,day' });
+      if (error) $('#grpMsg').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`;
+      else hotelAvail(active);
+    };
+  }
 }
 
 async function supplierFinance(active) {
@@ -677,33 +819,89 @@ async function transportFleet(active) {
   });
 }
 
+let shaFromT = null; // окно шахматки трансфера
+
 async function transportAvail(active) {
   const main = $('#main'); if (!main) return;
-  const { data: vcs } = await db.from('vehicle_class').select('id,name,pax_min,pax_max').eq('org_id', active.orgId);
-  const classes = (vcs || []).map(v => ({ id:v.id, label:`${v.name} (${v.pax_min}–${v.pax_max} pax)` }));
+  ensureShaStyle();
+  const N = 21;
+  if (!shaFromT) shaFromT = new Date().toISOString().slice(0, 10);
+  const fromD = shaFromT, toD = addDays(shaFromT, N);
+  const days = []; for (let i = 0; i < N; i++) days.push(addDays(shaFromT, i));
+
+  const { data: vcs } = await db.from('vehicle_class').select('id,name,pax_min,pax_max').eq('org_id', active.orgId).order('pax_min');
+  const classes = (vcs || []).map(v => ({ id: v.id, label: `${v.name} (${v.pax_min}–${v.pax_max} pax)` }));
   const ids = classes.map(c => c.id);
-  const { data: av } = ids.length ? await db.from('transport_availability').select('*').in('vehicle_class_id', ids).order('day') : { data: [] };
-  const cLabel = Object.fromEntries(classes.map(c => [c.id, c.label]));
+
+  const [{ data: av }, { data: hd }] = await Promise.all([
+    ids.length ? db.from('transport_availability').select('vehicle_class_id,day,units').in('vehicle_class_id', ids).gte('day', fromD).lt('day', toD) : Promise.resolve({ data: [] }),
+    ids.length ? db.from('hold').select('resource_id,day,quantity,status').eq('resource_type', 'vehicle').in('resource_id', ids).gte('day', fromD).lt('day', toD).in('status', ['held', 'confirmed']) : Promise.resolve({ data: [] }),
+  ]);
+  const units = {}; (av || []).forEach(a => { units[a.vehicle_class_id + '|' + a.day] = a.units; });
+  const held = {}, conf = {};
+  (hd || []).forEach(h => { const k = h.resource_id + '|' + h.day; if (h.status === 'confirmed') conf[k] = (conf[k] || 0) + h.quantity; else held[k] = (held[k] || 0) + h.quantity; });
+
+  const wd = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+  const headCells = days.map(d => {
+    const dt = new Date(d + 'T00:00:00Z'); const g = dt.getUTCDay(); const we = (g === 0 || g === 6);
+    return `<th class="${we ? 'we' : ''}">${dt.getUTCDate()}<br><span class="wd">${wd[g]}</span></th>`;
+  }).join('');
+
+  const cell = (vcId, d) => {
+    const k = vcId + '|' + d, total = units[k];
+    if (total == null) return `<td class="cell" style="background:#f4f5f6;color:var(--muted)" title="Доступность не задана">·</td>`;
+    const h = held[k] || 0, c = conf[k] || 0, free = total - h - c;
+    let bg, col;
+    if (free <= 0) { bg = 'var(--red-bg)'; col = 'var(--red)'; }
+    else if (h + c > 0) { bg = 'var(--amber-bg)'; col = 'var(--amber)'; }
+    else { bg = 'var(--green-bg)'; col = 'var(--green)'; }
+    return `<td class="cell" style="background:${bg};color:${col}" title="Свободно ${free} из ${total} · холд ${h} · подтв ${c}">${free}</td>`;
+  };
+
+  const rows = classes.length ? classes.map(c => `<tr><td class="rh">${esc(c.label)}</td>${days.map(d => cell(c.id, d)).join('')}</tr>`).join('')
+    : `<tr><td class="rh" colspan="${N + 1}" style="color:var(--muted);font-weight:400">Нет классов машин. Добавьте автопарк.</td></tr>`;
+
   main.innerHTML = `
-    <div class="page-head"><div><h1>Доступность</h1><div class="sub">Сколько машин каждого класса выделено под Waylo по датам.</div></div></div>
-    <div class="card"><div class="card-head">Добавить / обновить</div><div style="padding:14px">
+    <div class="page-head"><div><h1>Доступность</h1><div class="sub">Шахматка машин: сколько свободно по датам. Цвет — свободно / есть холды / занято.</div></div></div>
+    <div class="card"><div class="card-head">Выделить машины под Waylo</div><div style="padding:14px">
       <div class="row">
         <div class="field" style="min-width:240px"><label>Класс машины</label><select class="input" id="tvVc"><option value="">— выбрать —</option>${classes.map(c => `<option value="${c.id}">${esc(c.label)}</option>`).join('')}</select></div>
-        <div class="field"><label>Дата</label><input type="date" id="tvDay"></div>
+        <div class="field"><label>С даты</label><input type="date" id="tvFrom" value="${fromD}"></div>
+        <div class="field"><label>По дату (вкл.)</label><input type="date" id="tvTo" value="${days[N - 1]}"></div>
         <div class="field" style="width:90px"><label>Машин</label><input type="number" min="0" value="1" id="tvUnits"></div>
-        <button class="btn btn--primary btn--sm" id="tvSave">Сохранить</button>
-      </div><div id="tvMsg"></div></div></div>
-    <div class="card"><div class="card-head">Текущая доступность</div>
-    ${(av||[]).length ? `<table><thead><tr><th>Класс</th><th>Дата</th><th style="text-align:right">Машин</th></tr></thead><tbody>
-      ${av.map(a => `<tr><td>${esc(cLabel[a.vehicle_class_id])}</td><td class="hint">${esc(a.day)}</td><td class="mono" style="text-align:right">${a.units}</td></tr>`).join('')}
-    </tbody></table>` : `<div class="card-empty">Доступность не задана.</div>`}</div>`;
+        <button class="btn btn--primary btn--sm" id="tvSave">Выделить</button>
+      </div><div class="hint" style="margin-top:6px">Выставит количество на каждый день диапазона (перезапишет существующее).</div><div id="tvMsg"></div></div></div>
+    <div class="card"><div class="card-head">Шахматка · ${fromD} — ${days[N - 1]}</div><div style="padding:14px">
+      <div class="sha-nav">
+        <button class="btn btn--ghost btn--sm" id="shaPrevT">‹ Раньше</button>
+        <button class="btn btn--ghost btn--sm" id="shaTodayT">Сегодня</button>
+        <button class="btn btn--ghost btn--sm" id="shaNextT">Позже ›</button>
+        <input type="date" id="shaJumpT" value="${fromD}" style="margin-left:6px">
+      </div>
+      <div class="sha-wrap"><table class="sha"><thead><tr><th class="rh">Класс машины</th>${headCells}</tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="sha-leg">
+        <span><i style="background:var(--green-bg)"></i>свободно</span>
+        <span><i style="background:var(--amber-bg)"></i>есть холды</span>
+        <span><i style="background:var(--red-bg)"></i>занято</span>
+        <span><i style="background:#f4f5f6"></i>не задано</span>
+        <span>число в ячейке = свободных машин</span>
+      </div>
+    </div></div>`;
+
   $('#tvSave').onclick = async () => {
-    const vc = $('#tvVc').value, day = $('#tvDay').value, units = Number($('#tvUnits').value || 0);
-    if (!vc || !day) { $('#tvMsg').innerHTML = `<div class="notice notice--err">Выберите класс и дату.</div>`; return; }
-    const { error } = await db.from('transport_availability').upsert({ vehicle_class_id:vc, day, units }, { onConflict:'vehicle_class_id,day' });
+    const vc = $('#tvVc').value, f = $('#tvFrom').value, tt = $('#tvTo').value, u = Number($('#tvUnits').value || 0);
+    if (!vc || !f || !tt) { $('#tvMsg').innerHTML = `<div class="notice notice--err">Выберите класс и обе даты.</div>`; return; }
+    if (f > tt) { $('#tvMsg').innerHTML = `<div class="notice notice--err">«С даты» позже, чем «по дату».</div>`; return; }
+    const batch = []; let cur = f; let guard = 0;
+    while (cur <= tt && guard < 400) { batch.push({ vehicle_class_id: vc, day: cur, units: u }); cur = addDays(cur, 1); guard++; }
+    const { error } = await db.from('transport_availability').upsert(batch, { onConflict: 'vehicle_class_id,day' });
     if (error) $('#tvMsg').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`;
     else transportAvail(active);
   };
+  $('#shaPrevT').onclick = () => { shaFromT = addDays(shaFromT, -N); transportAvail(active); };
+  $('#shaNextT').onclick = () => { shaFromT = addDays(shaFromT, N); transportAvail(active); };
+  $('#shaTodayT').onclick = () => { shaFromT = new Date().toISOString().slice(0, 10); transportAvail(active); };
+  $('#shaJumpT').onchange = (e) => { if (e.target.value) { shaFromT = e.target.value; transportAvail(active); } };
 }
 
 /* ── PLATFORM ────────────────────────────────────────────────────────────── */
