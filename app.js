@@ -42,7 +42,7 @@ async function loadProfile() {
   const ctx = (mems || []).map(m => ({ key:m.org_id, kind:'org', orgId:m.org_id, orgType:m.organization?.type, orgName:m.organization?.name, role:m.role }));
   if (platform) ctx.unshift({ key:'platform', kind:'platform', orgName:'Waylo', orgType:'PLATFORM', role:'operator' });
   state.contexts = ctx; state.isPlatform = platform;
-  if (!state.activeKey) state.activeKey = ctx[0]?.key || null;
+  if (!ctx.find(c => c.key === state.activeKey)) state.activeKey = ctx[0]?.key || null;
 }
 
 function boot() {
@@ -51,10 +51,24 @@ function boot() {
   // управляет onAuthStateChange — он отрисует кабинет после успешного входа.
   render();
 }
+let _authUid = null;
 db.auth.onAuthStateChange(async (_e, session) => {
-  state.user = session?.user || null;
-  state.activeKey = null; state.tab = null; state.openReq = null;
-  if (state.user) { try { await db.rpc('accept_pending_invites'); } catch (_e) {} await loadProfile(); }
+  const user = session?.user || null;
+  if (!user) {                                  // выход
+    _authUid = null;
+    state.user = null; state.contexts = []; state.isPlatform = false;
+    state.activeKey = null; state.tab = null; state.openReq = null;
+    render(); return;
+  }
+  // Тот же пользователь уже загружен → это повторное событие (фокус вкладки,
+  // обновление токена, INITIAL_SESSION). Игнорируем, чтобы НЕ обнулять activeKey
+  // и не «выкидывать» из выбранного кабинета между перерисовками контента.
+  if (_authUid === user.id && state.contexts.length) { state.user = user; return; }
+  _authUid = user.id;
+  state.user = user;
+  state.tab = null; state.openReq = null;
+  try { await db.rpc('accept_pending_invites'); } catch (_e) {}
+  await loadProfile();
   render();
 });
 
