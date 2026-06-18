@@ -450,10 +450,18 @@ async function renderVoucher(reqId, lines) {
 
 /* ── HOTEL ───────────────────────────────────────────────────────────────── */
 async function renderHotel(active) {
-  if (!state.tab) state.tab = 'confirm';
-  navShell('Отель · ' + active.orgName, [{ id:'confirm', label:'Подтверждения' }, { id:'avail', label:'Доступность' }, { id:'finance', label:'Финансы' }]);
-  if (state.tab === 'confirm') supplierConfirm(active, 'отель');
+  if (!state.tab || !['cats', 'avail', 'bookings', 'confirm', 'finance'].includes(state.tab)) state.tab = 'cats';
+  navShell('Отель · ' + active.orgName, [
+    { id:'cats', label:'Категории' },
+    { id:'avail', label:'Доступность' },
+    { id:'bookings', label:'Шахматка броней' },
+    { id:'confirm', label:'Подтверждения' },
+    { id:'finance', label:'Финансы' },
+  ]);
+  if (state.tab === 'cats') hotelCats(active);
   else if (state.tab === 'avail') hotelAvail(active);
+  else if (state.tab === 'bookings') hotelBookings(active);
+  else if (state.tab === 'confirm') supplierConfirm(active, 'отель');
   else supplierFinance(active);
 }
 
@@ -563,7 +571,7 @@ async function hotelAvail(active) {
   while (cur <= shaTo && guard < 92) { days.push(cur); cur = addDays(cur, 1); guard++; }
   const lastDay = days[days.length - 1];
 
-  const { data: ts } = await db.from('room_type').select('id,name,default_availability').eq('property_id', shaProp).order('name');
+  const { data: ts } = await db.from('room_type').select('id,name,default_availability').eq('property_id', shaProp).eq('is_active', true).order('name');
   const rts = ts || [];
   const rtIds = rts.map(r => r.id);
   const defOf = {}; rts.forEach(r => defOf[r.id] = r.default_availability || 0);
@@ -727,6 +735,207 @@ async function hotelAvail(active) {
       else hotelAvail(active);
     };
   }
+}
+
+function ensureBkgStyle() {
+  if (document.getElementById('bkg-style')) return;
+  const st = document.createElement('style');
+  st.id = 'bkg-style';
+  st.textContent = `
+  .bkg-wrap{overflow:auto;max-height:74vh;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+  .bkg{border-collapse:separate;border-spacing:0;font-size:11.5px;width:max-content}
+  .bkg th,.bkg td{border-right:1px solid var(--line-2);border-bottom:1px solid var(--line-2);height:26px;min-width:34px;text-align:center;white-space:nowrap;padding:0 3px;box-sizing:border-box}
+  .bkg thead th{position:sticky;top:0;z-index:2;background:var(--bg);font-size:10px;color:var(--muted);font-weight:600;line-height:1.12}
+  .bkg thead th.we{color:var(--red)}
+  .bkg .rh{position:sticky;left:0;z-index:3;background:var(--surface);text-align:left;min-width:150px;padding:4px 10px;box-shadow:1px 0 0 var(--line)}
+  .bkg thead .rh{z-index:4;background:var(--bg)}
+  .bkg tr.catrow td{background:var(--accent-soft);font-weight:700;color:var(--accent-ink)}
+  .bkg tr.catrow td.rh{color:var(--accent-ink)}
+  .bkg td.wecell{background:#fafbfb}
+  .bkg .av{font-family:var(--mono)}
+  .bkg .slot{color:var(--muted);font-size:10.5px;font-weight:400}
+  .bkg td.b{font-weight:600;overflow:hidden;text-overflow:ellipsis;font-size:10.5px;text-align:left;padding-left:6px;max-width:1px}
+  .bkg td.b.pend{background:var(--amber-bg);color:var(--amber)}
+  .bkg td.b.conf{background:var(--accent-soft);color:var(--accent-ink)}
+  .bkg-leg{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:12px}
+  .bkg-leg span{display:inline-flex;align-items:center;gap:6px}
+  .bkg-leg i{width:13px;height:13px;border-radius:3px;display:inline-block;border:1px solid var(--line-2)}
+  `;
+  document.head.appendChild(st);
+}
+
+let catForm = null;          // null | {} (новая) | объект категории (правка)
+let bkProp = null, bkFrom = null;
+
+async function hotelCats(active) {
+  const main = $('#main'); if (!main) return;
+  const { data: props } = await db.from('property').select('id,name,city,kind').eq('org_id', active.orgId).order('name');
+  const propList = props || [];
+  const pById = Object.fromEntries(propList.map(p => [p.id, p]));
+  const ids = propList.map(p => p.id);
+  const { data: cats } = ids.length ? await db.from('room_type').select('id,property_id,name,short_name,max_occupancy,default_availability,is_active').in('property_id', ids).order('name') : { data: [] };
+  const list = cats || [];
+
+  let formHtml = '';
+  if (catForm) {
+    const c = catForm, isEdit = !!c.id;
+    formHtml = `<div class="card" style="margin-bottom:14px"><div class="card-head">${isEdit ? 'Изменить категорию' : 'Новая категория'}</div><div style="padding:14px">
+      <div class="row">
+        <div class="field" style="min-width:200px"><label>Объект</label><select class="input" id="cfProp" ${isEdit ? 'disabled' : ''}>${propList.map(p => `<option value="${p.id}" ${p.id === (c.property_id || propList[0] && propList[0].id) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
+        <div class="field" style="min-width:210px"><label>Название категории</label><input class="input" id="cfName" value="${esc(c.name || '')}" placeholder="Standart Double"></div>
+        <div class="field" style="width:130px"><label>Сокращённое</label><input class="input" id="cfShort" value="${esc(c.short_name || '')}" placeholder="std dbl"></div>
+        <div class="field" style="width:120px"><label>Основных мест</label><input type="number" min="1" class="input" id="cfOcc" value="${c.max_occupancy || 2}"></div>
+        <div class="field" style="width:140px"><label>Дефолт-доступность</label><input type="number" min="0" class="input" id="cfDef" value="${c.default_availability || 0}"></div>
+        <div class="field" style="width:90px"><label>Активна</label><select class="input" id="cfAct"><option value="1" ${c.is_active !== false ? 'selected' : ''}>Да</option><option value="0" ${c.is_active === false ? 'selected' : ''}>Нет</option></select></div>
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+        <button class="btn btn--primary btn--sm" id="cfSave">${isEdit ? 'Сохранить' : 'Создать'}</button>
+        <button class="btn btn--ghost btn--sm" id="cfCancel">Отмена</button>
+        <span id="cfMsg" class="hint"></span>
+      </div>
+      <div class="hint" style="margin-top:8px">Цены задаются платформой отдельно. Здесь — состав категорий и доступность.</div>
+    </div></div>`;
+  }
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Категории номеров</h1><div class="sub">Типы номеров объекта: название, мест, доступность по умолчанию.</div></div>
+      ${propList.length ? `<button class="btn btn--primary" id="catAdd">+ Добавить категорию</button>` : ''}</div>
+    ${propList.length ? '' : `<div class="card"><div class="card-empty">У вашей организации нет объектов. Объект/резорт заводит платформа в каталоге.</div></div>`}
+    ${formHtml}
+    ${propList.length ? `<div class="card"><div class="card-head">Список категорий</div>
+    ${list.length ? `<table><thead><tr><th>Вкл.</th><th>Объект</th><th>Название</th><th>Сокр.</th><th style="text-align:center">Мест</th><th style="text-align:center">Дефолт</th><th></th></tr></thead><tbody>
+      ${list.map(c => `<tr>
+        <td>${c.is_active ? '<span class="badge badge--accent">вкл</span>' : '<span class="badge">выкл</span>'}</td>
+        <td class="hint">${esc(pById[c.property_id] && pById[c.property_id].name || '—')}</td>
+        <td><b>${esc(c.name)}</b></td>
+        <td class="hint">${esc(c.short_name || '—')}</td>
+        <td class="mono" style="text-align:center">${c.max_occupancy}</td>
+        <td class="mono" style="text-align:center">${c.default_availability || 0}</td>
+        <td style="text-align:right;white-space:nowrap"><button class="btn btn--ghost btn--sm catEdit" data-id="${c.id}">Изменить</button> <button class="btn btn--ghost btn--sm catDel" data-id="${c.id}">✕</button></td>
+      </tr>`).join('')}
+    </tbody></table>` : `<div class="card-empty">Категорий пока нет. Нажмите «Добавить категорию».</div>`}</div>` : ''}`;
+
+  const add = $('#catAdd'); if (add) add.onclick = () => { catForm = {}; hotelCats(active); };
+  const cancel = $('#cfCancel'); if (cancel) cancel.onclick = () => { catForm = null; hotelCats(active); };
+  document.querySelectorAll('.catEdit').forEach(b => b.onclick = () => { catForm = list.find(x => x.id === b.dataset.id) || {}; hotelCats(active); });
+  document.querySelectorAll('.catDel').forEach(b => b.onclick = async () => {
+    const c = list.find(x => x.id === b.dataset.id);
+    if (!confirm('Удалить категорию «' + (c && c.name || '') + '»? Будут удалены её доступность и тарифы.')) return;
+    const { error } = await db.from('room_type').delete().eq('id', b.dataset.id);
+    if (error) alert(error.message); else { catForm = null; hotelCats(active); }
+  });
+  const save = $('#cfSave'); if (save) save.onclick = async () => {
+    const name = ($('#cfName').value || '').trim();
+    if (!name) { $('#cfMsg').innerHTML = '<span style="color:var(--red)">Укажите название.</span>'; return; }
+    const payload = {
+      name,
+      short_name: ($('#cfShort').value || '').trim() || null,
+      max_occupancy: Math.max(1, parseInt($('#cfOcc').value || '2', 10)),
+      default_availability: Math.max(0, parseInt($('#cfDef').value || '0', 10)),
+      is_active: $('#cfAct').value === '1',
+    };
+    let error;
+    if (catForm.id) ({ error } = await db.from('room_type').update(payload).eq('id', catForm.id));
+    else { payload.property_id = $('#cfProp').value; ({ error } = await db.from('room_type').insert(payload)); }
+    if (error) { $('#cfMsg').innerHTML = `<span style="color:var(--red)">${esc(error.message)}</span>`; return; }
+    catForm = null; hotelCats(active);
+  };
+}
+
+async function hotelBookings(active) {
+  const main = $('#main'); if (!main) return;
+  ensureBkgStyle();
+  const { data: props } = await db.from('property').select('id,name').eq('org_id', active.orgId).order('name');
+  const propList = props || [];
+  if (!propList.length) { main.innerHTML = `<div class="page-head"><div><h1>Шахматка броней</h1></div></div><div class="card"><div class="card-empty">Нет объектов.</div></div>`; return; }
+  if (!bkProp || !propList.some(p => p.id === bkProp)) bkProp = propList[0].id;
+
+  const today = new Date();
+  if (!bkFrom) bkFrom = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1)).toISOString().slice(0, 10);
+  const N = 31;
+  const days = []; for (let i = 0; i < N; i++) days.push(addDays(bkFrom, i));
+  const endExcl = addDays(bkFrom, N);
+
+  const { data: ts } = await db.from('room_type').select('id,name,default_availability').eq('property_id', bkProp).eq('is_active', true).order('name');
+  const rts = ts || [];
+  const rtIds = rts.map(r => r.id);
+
+  const [{ data: al }, { data: lines }] = await Promise.all([
+    rtIds.length ? db.from('room_allotment').select('room_type_id,day,quantity,closed').in('room_type_id', rtIds).gte('day', bkFrom).lt('day', endExcl) : Promise.resolve({ data: [] }),
+    rtIds.length ? db.from('request_line').select('id,resource_id,from_date,to_date,quantity,confirmation,request_id').eq('type', 'HOTEL').in('resource_id', rtIds).lt('from_date', endExcl).gt('to_date', bkFrom).neq('confirmation', 'rejected') : Promise.resolve({ data: [] }),
+  ]);
+  const allot = {}; (al || []).forEach(a => allot[a.room_type_id + '|' + a.day] = { quantity: a.quantity, closed: a.closed });
+  const defOf = {}; rts.forEach(r => defOf[r.id] = r.default_availability || 0);
+  const baseAvail = (rtId, d) => { const a = allot[rtId + '|' + d]; return a ? (a.closed ? 0 : a.quantity) : (defOf[rtId] || 0); };
+
+  const reqIds = [...new Set((lines || []).map(l => l.request_id))];
+  const { data: reqs } = reqIds.length ? await db.from('request').select('id,name,client_name').in('id', reqIds) : { data: [] };
+  const reqName = {}; (reqs || []).forEach(r => reqName[r.id] = r.name || r.client_name || 'Бронь');
+
+  const linesByRt = {}; (lines || []).forEach(l => { (linesByRt[l.resource_id] = linesByRt[l.resource_id] || []).push(l); });
+
+  const headCells = days.map(d => { const dt = new Date(d + 'T00:00:00Z'), g = dt.getUTCDay(); return `<th class="${g === 0 || g === 6 ? 'we' : ''}">${dt.getUTCDate()}<br><span style="font-weight:400">${RU_WD[g]}</span></th>`; }).join('');
+
+  const sections = rts.map(rt => {
+    const insts = [];
+    (linesByRt[rt.id] || []).forEach(l => {
+      const lbl = reqName[l.request_id] || 'Бронь';
+      for (let i = 0; i < l.quantity; i++) insts.push({ from: l.from_date, to: l.to_date, conf: l.confirmation, lbl });
+    });
+    insts.sort((a, b) => a.from < b.from ? -1 : a.from > b.from ? 1 : 0);
+    const slotEnd = [];
+    insts.forEach(ins => { let s = slotEnd.findIndex(e => e <= ins.from); if (s < 0) { s = slotEnd.length; slotEnd.push(ins.to); } else slotEnd[s] = ins.to; ins.slot = s; });
+    let peak = 0; days.forEach(d => { peak = Math.max(peak, baseAvail(rt.id, d)); });
+    const nSlots = Math.min(25, Math.max(slotEnd.length, peak, 1));
+    const cellInst = {};
+    insts.forEach(ins => { let c = ins.from; while (c < ins.to) { cellInst[ins.slot + '|' + c] = { ins, start: c === ins.from }; c = addDays(c, 1); } });
+
+    const availRow = `<tr class="catrow"><td class="rh">${esc(rt.name)}</td>${days.map(d => `<td class="av" title="доступно ${baseAvail(rt.id, d)}">${baseAvail(rt.id, d)}</td>`).join('')}</tr>`;
+    const slotRows = [];
+    for (let s = 0; s < nSlots; s++) {
+      let cells = '', i = 0;
+      while (i < days.length) {
+        const d = days[i], ci = cellInst[s + '|' + d];
+        if (ci) {
+          let span = 0, c = d;
+          while (c < ci.ins.to && (i + span) < days.length) { span++; c = addDays(c, 1); }
+          const cls = ci.ins.conf === 'confirmed' ? 'conf' : 'pend';
+          cells += `<td class="b ${cls}" colspan="${span}" title="${esc(ci.ins.lbl)} · ${ci.ins.conf === 'confirmed' ? 'подтверждено' : 'холд'}">${esc(ci.ins.lbl)}</td>`;
+          i += span;
+        } else {
+          const dt = new Date(d + 'T00:00:00Z'), we = (dt.getUTCDay() === 0 || dt.getUTCDay() === 6);
+          cells += `<td class="${we ? 'wecell' : ''}"></td>`; i++;
+        }
+      }
+      slotRows.push(`<tr><td class="rh slot">место ${s + 1}</td>${cells}</tr>`);
+    }
+    return availRow + slotRows.join('');
+  }).join('');
+
+  const monLabel = new Date(bkFrom + 'T00:00:00Z').toLocaleDateString('ru-RU', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Шахматка броней</h1><div class="sub">Кто и когда забронировал. Полоса — бронь тура; «холд» ждёт вашего подтверждения во вкладке «Подтверждения».</div></div></div>
+    <div class="card"><div class="card-head">Объект и период</div><div style="padding:14px">
+      <div class="sha-nav">
+        ${propList.length > 1 ? `<select class="input" id="bkProp" style="max-width:260px">${propList.map(p => `<option value="${p.id}" ${p.id === bkProp ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
+        <button class="btn btn--ghost btn--sm" id="bkPrev">‹</button>
+        <b style="min-width:160px;text-align:center;text-transform:capitalize">${monLabel}</b>
+        <button class="btn btn--ghost btn--sm" id="bkNext">›</button>
+        <button class="btn btn--ghost btn--sm" id="bkToday">Текущий месяц</button>
+      </div>
+      ${rts.length ? `<div class="bkg-wrap"><table class="bkg"><thead><tr><th class="rh">Категория / место</th>${headCells}</tr></thead><tbody>${sections}</tbody></table></div>
+      <div class="bkg-leg">
+        <span><i style="background:var(--accent-soft)"></i>подтверждено</span>
+        <span><i style="background:var(--amber-bg)"></i>холд (ждёт подтверждения)</span>
+        <span>число в строке категории = доступно на дату</span>
+      </div>` : `<div class="card-empty">Нет активных категорий. Создайте их во вкладке «Категории».</div>`}
+    </div></div>`;
+
+  const ps = $('#bkProp'); if (ps) ps.onchange = e => { bkProp = e.target.value; hotelBookings(active); };
+  $('#bkPrev').onclick = () => { const d = new Date(bkFrom + 'T00:00:00Z'); bkFrom = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1)).toISOString().slice(0, 10); hotelBookings(active); };
+  $('#bkNext').onclick = () => { const d = new Date(bkFrom + 'T00:00:00Z'); bkFrom = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString().slice(0, 10); hotelBookings(active); };
+  $('#bkToday').onclick = () => { const t = new Date(); bkFrom = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), 1)).toISOString().slice(0, 10); hotelBookings(active); };
 }
 
 async function supplierFinance(active) {
