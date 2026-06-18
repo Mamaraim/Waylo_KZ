@@ -33,6 +33,7 @@ const typeBadge = (t) => t === 'HOTEL' ? `<span class="badge badge--accent">от
 
 /* ── state ───────────────────────────────────────────────────────────────── */
 let state = { user:null, contexts:[], isPlatform:false, activeKey:null, tab:null, openReq:null };
+let loginMode = 'signin';
 
 async function loadProfile() {
   const { data: mems } = await db.from('membership').select('role, org_id, organization(id,type,name,country)');
@@ -53,7 +54,7 @@ function boot() {
 db.auth.onAuthStateChange(async (_e, session) => {
   state.user = session?.user || null;
   state.activeKey = null; state.tab = null; state.openReq = null;
-  if (state.user) await loadProfile();
+  if (state.user) { try { await db.rpc('accept_pending_invites'); } catch (_e) {} await loadProfile(); }
   render();
 });
 
@@ -61,6 +62,7 @@ function render() { state.user ? renderShell() : renderLogin(); }
 
 /* ── login ───────────────────────────────────────────────────────────────── */
 function renderLogin() {
+  if (loginMode === 'signup') return renderSignup();
   const SEGMENTS = [
     { key:'agency',      label:'Travel Agency', sub:'Турагентства и DMC (Казахстан) — заявки, маршруты, документы, статусы.', email:'dmc@waylo.test' },
     { key:'hospitality', label:'Hospitality',   sub:'Отели и резорты — подтверждения, доступность, цены.',                 email:'hotel@waylo.test' },
@@ -81,6 +83,7 @@ function renderLogin() {
       <button class="btn btn--primary" id="loginBtn">Войти</button>
       <div class="login-creds">Тест (пароль <code>waylo-test-pass</code>): <code id="segCred">${esc(seg.email)}</code></div>
       <div class="op-link">Оператор Waylo — <a id="opLink">platform@waylo.test</a></div>
+      <div class="op-link" style="margin-top:6px">Впервые здесь? <a id="toSignup">Регистрация по приглашению →</a></div>
     </form></div>`;
   const pick = (s) => {
     seg = s;
@@ -90,11 +93,52 @@ function renderLogin() {
   };
   $('#segSel').onchange = () => pick(SEGMENTS.find(x => x.key === $('#segSel').value));
   $('#opLink').onclick = () => { $('#email').value = 'platform@waylo.test'; $('#segCred').textContent = 'platform@waylo.test'; };
+  $('#toSignup').onclick = () => { loginMode = 'signup'; renderLogin(); };
   $('#loginForm').onsubmit = async (e) => {
     e.preventDefault();
     const btn = $('#loginBtn'); btn.disabled = true; btn.textContent = 'Входим…';
     const { error } = await db.auth.signInWithPassword({ email:$('#email').value, password:$('#password').value });
     if (error) { $('#loginErr').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; btn.disabled = false; btn.textContent = 'Войти'; }
+  };
+}
+
+/* ── регистрация по приглашению ────────────────────────────────────────────
+   Статический фронт не создаёт чужие аккаунты (нет service-ключа). Приглашённый
+   регистрируется сам тем email, на который пришло приглашение; членство в
+   организации материализуется при входе через RPC accept_pending_invites(). */
+function renderSignup() {
+  app.innerHTML = `
+    <div class="login-wrap"><form class="login-card" id="suForm">
+      <div class="brand">Waylo<span class="chev">›</span><span class="kz">KZ</span></div>
+      <div class="tag">Регистрация по приглашению</div>
+      <div class="seg-sub">Зарегистрируйтесь email, на который вам выслали приглашение. Доступ к кабинету появится автоматически после входа.</div>
+      <div class="field"><label>Почта</label><input type="email" id="suEmail" autocomplete="username" placeholder="you@company.com" required></div>
+      <div class="field"><label>Пароль</label><input type="password" id="suPass" autocomplete="new-password" placeholder="не менее 6 символов" required></div>
+      <div class="field"><label>Повтор пароля</label><input type="password" id="suPass2" autocomplete="new-password" required></div>
+      <div id="suErr"></div>
+      <button class="btn btn--primary" id="suBtn">Зарегистрироваться</button>
+      <div class="op-link" style="margin-top:8px"><a id="toSignin">← Уже есть аккаунт? Войти</a></div>
+    </form></div>`;
+  $('#toSignin').onclick = () => { loginMode = 'signin'; renderLogin(); };
+  $('#suForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const email = ($('#suEmail').value || '').trim().toLowerCase();
+    const p1 = $('#suPass').value, p2 = $('#suPass2').value;
+    if (p1.length < 6) { $('#suErr').innerHTML = `<div class="notice notice--err">Пароль не короче 6 символов.</div>`; return; }
+    if (p1 !== p2) { $('#suErr').innerHTML = `<div class="notice notice--err">Пароли не совпадают.</div>`; return; }
+    const btn = $('#suBtn'); btn.disabled = true; btn.textContent = 'Регистрируем…';
+    const { data, error } = await db.auth.signUp({ email, password: p1 });
+    if (error) { $('#suErr').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; btn.disabled = false; btn.textContent = 'Зарегистрироваться'; return; }
+    if (data && data.session) {
+      // мгновенный вход (подтверждение почты выключено) → onAuthStateChange примет приглашения и отрисует кабинет
+      const { error: e2 } = await db.auth.signInWithPassword({ email, password: p1 });
+      if (e2) { $('#suErr').innerHTML = `<div class="notice notice--err">${esc(e2.message)}</div>`; btn.disabled = false; btn.textContent = 'Зарегистрироваться'; }
+    } else {
+      // включено подтверждение почты — сессии пока нет
+      $('#suErr').innerHTML = `<div class="notice">Аккаунт создан. Подтвердите почту по ссылке из письма, затем войдите.</div>`;
+      btn.disabled = false; btn.textContent = 'Зарегистрироваться';
+      loginMode = 'signin';
+    }
   };
 }
 
@@ -450,19 +494,81 @@ async function renderVoucher(reqId, lines) {
 
 /* ── HOTEL ───────────────────────────────────────────────────────────────── */
 async function renderHotel(active) {
-  if (!state.tab || !['cats', 'avail', 'bookings', 'confirm', 'finance'].includes(state.tab)) state.tab = 'cats';
+  if (!state.tab || !['cats', 'avail', 'bookings', 'confirm', 'finance', 'team'].includes(state.tab)) state.tab = 'cats';
   navShell('Отель · ' + active.orgName, [
     { id:'cats', label:'Категории' },
     { id:'avail', label:'Доступность' },
     { id:'bookings', label:'Шахматка броней' },
     { id:'confirm', label:'Подтверждения' },
     { id:'finance', label:'Финансы' },
+    { id:'team', label:'Команда' },
   ]);
   if (state.tab === 'cats') hotelCats(active);
   else if (state.tab === 'avail') hotelAvail(active);
   else if (state.tab === 'bookings') hotelBookings(active);
   else if (state.tab === 'confirm') supplierConfirm(active, 'отель');
+  else if (state.tab === 'team') cabinetTeam(active);
   else supplierFinance(active);
+}
+
+/* ── Команда: состав организации, роли, приглашения ─────────────────────────
+   Используется в кабинете отеля/резорта (и пригодна для любого тенанта).
+   Суперадмин приглашает админов (insert в invitation), меняет роли и удаляет
+   участников (RLS в 0001 разрешает это только суперадмину своей орг.; триггер
+   guard_last_superadmin не даёт убрать последнего суперадмина). Админ видит
+   состав только для чтения. */
+async function cabinetTeam(active) {
+  const main = $('#main'); if (!main) return;
+  const isSuper = active.role === 'superadmin';
+  const [{ data: mems }, { data: invs }] = await Promise.all([
+    db.from('membership').select('id, role, user_id, created_at, app_user(email,name)').eq('org_id', active.orgId).order('created_at'),
+    db.from('invitation').select('id,email,role,status,created_at').eq('org_id', active.orgId).eq('status', 'pending').order('created_at'),
+  ]);
+  const roleLabel = { superadmin:'суперадмин', admin:'админ' };
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Команда</h1><div class="sub">Сотрудники с доступом к кабинету «${esc(active.orgName)}». ${isSuper ? 'Суперадмин приглашает админов и управляет ролями.' : 'Менять состав может только суперадмин.'}</div></div></div>
+    <div id="tMsg"></div>
+    ${isSuper ? `<div class="card"><div class="card-head">Пригласить сотрудника</div>
+      <div class="row" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;padding:12px">
+        <div class="field" style="flex:1;min-width:220px"><label>Email сотрудника</label><input class="input" type="email" id="invEmail" placeholder="colleague@hotel.com"></div>
+        <div class="field" style="min-width:160px"><label>Роль</label><select class="input" id="invRole"><option value="admin">админ</option><option value="superadmin">суперадмин</option></select></div>
+        <button class="btn btn--primary" id="invBtn">Пригласить</button>
+      </div>
+      <div class="hint" style="padding:0 12px 12px">Сотрудник получит доступ, зарегистрировавшись этим email на странице входа (Регистрация по приглашению).</div>
+    </div>` : ''}
+    <div class="card"><div class="card-head">Сотрудники (${(mems||[]).length})</div>
+    ${(mems||[]).length ? `<table><thead><tr><th>Email</th><th>Имя</th><th>Роль</th>${isSuper ? '<th></th>' : ''}</tr></thead><tbody>
+      ${mems.map(m => { const me = m.user_id === state.user.id; return `<tr><td>${esc(m.app_user?.email || '—')}${me ? ' <span class="hint">(вы)</span>' : ''}</td><td>${esc(m.app_user?.name || '—')}</td><td><span class="badge badge--${m.role==='superadmin'?'accent':'gray'}">${roleLabel[m.role]||m.role}</span></td>${isSuper ? `<td style="text-align:right;white-space:nowrap"><select class="input roleSel" data-id="${m.id}" style="width:auto;display:inline-block">${['admin','superadmin'].map(r=>`<option value="${r}" ${m.role===r?'selected':''}>${roleLabel[r]}</option>`).join('')}</select> <button class="btn btn--ghost btn--sm rmBtn" data-id="${m.id}">Удалить</button></td>` : ''}</tr>`; }).join('')}
+    </tbody></table>` : `<div class="card-empty">Нет сотрудников.</div>`}</div>
+    ${isSuper && (invs||[]).length ? `<div class="card"><div class="card-head">Приглашения (ожидают регистрации)</div>
+      <table><thead><tr><th>Email</th><th>Роль</th><th></th></tr></thead><tbody>
+      ${invs.map(i => `<tr><td>${esc(i.email)}</td><td>${roleLabel[i.role]||i.role}</td><td style="text-align:right"><button class="btn btn--ghost btn--sm revBtn" data-id="${i.id}">Отозвать</button></td></tr>`).join('')}
+      </tbody></table></div>` : ''}`;
+  if (!isSuper) return;
+  const err = (m) => { $('#tMsg').innerHTML = `<div class="notice notice--err">${esc(m)}</div>`; };
+  const inv = $('#invBtn');
+  if (inv) inv.onclick = async () => {
+    const email = ($('#invEmail').value || '').trim().toLowerCase();
+    const role = $('#invRole').value;
+    if (!email) { err('Укажите email сотрудника.'); return; }
+    inv.disabled = true; inv.textContent = 'Приглашаем…';
+    const { error } = await db.from('invitation').insert({ org_id: active.orgId, email, role, invited_by: state.user.id });
+    if (error) { err(error.message); inv.disabled = false; inv.textContent = 'Пригласить'; } else cabinetTeam(active);
+  };
+  document.querySelectorAll('.roleSel').forEach(s => s.onchange = async () => {
+    const { error } = await db.from('membership').update({ role: s.value }).eq('id', s.dataset.id);
+    if (error) err(error.message);
+    cabinetTeam(active);
+  });
+  document.querySelectorAll('.rmBtn').forEach(b => b.onclick = async () => {
+    if (!confirm('Убрать этого сотрудника из организации?')) return;
+    const { error } = await db.from('membership').delete().eq('id', b.dataset.id);
+    if (error) err(error.message); else cabinetTeam(active);
+  });
+  document.querySelectorAll('.revBtn').forEach(b => b.onclick = async () => {
+    const { error } = await db.from('invitation').update({ status: 'revoked' }).eq('id', b.dataset.id);
+    if (error) err(error.message); else cabinetTeam(active);
+  });
 }
 
 async function supplierConfirm(active, word) {
@@ -1120,13 +1226,50 @@ async function renderPlatform() {
   navShell('Платформа · Waylo', [{ id:'orgs', label:'Организации' }, { id:'invoices', label:'Деньги' }]);
   const main = $('#main'); if (!main) return;
   if (state.tab === 'orgs') {
-    const { data: orgs } = await db.from('organization').select('*').order('type');
+    const [{ data: orgs }, { data: invs }] = await Promise.all([
+      db.from('organization').select('*').order('type'),
+      db.from('invitation').select('id,org_id,email,role,status').eq('status', 'pending'),
+    ]);
+    const invByOrg = {}; (invs||[]).forEach(i => { (invByOrg[i.org_id] = invByOrg[i.org_id] || []).push(i); });
     main.innerHTML = `
-      <div class="page-head"><div><h1>Организации</h1><div class="sub">Все участники коридора.</div></div></div>
+      <div class="page-head"><div><h1>Организации</h1><div class="sub">Платформа заводит организацию и приглашает её суперадмина. Каждый отель — отдельная организация со своим кабинетом.</div></div></div>
+      <div id="oMsg"></div>
+      <div class="card"><div class="card-head">Добавить организацию</div>
+        <div class="row" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;padding:12px">
+          <div class="field" style="flex:1;min-width:200px"><label>Название</label><input class="input" id="orgName" placeholder="Hotel Registan Plaza"></div>
+          <div class="field" style="min-width:150px"><label>Тип</label><select class="input" id="orgType"><option value="HOTEL">Отель/Резорт</option><option value="TRANSPORT">Трансфер</option><option value="DMC">DMC</option></select></div>
+          <div class="field" style="width:90px"><label>Страна</label><input class="input" id="orgCountry" placeholder="UZ" value="UZ"></div>
+          <div class="field" style="flex:1;min-width:200px"><label>Email суперадмина</label><input class="input" type="email" id="orgEmail" placeholder="owner@hotel.com"></div>
+          <button class="btn btn--primary" id="orgBtn">Создать + пригласить</button>
+        </div>
+        <div class="hint" style="padding:0 12px 12px">Суперадмин получит доступ, зарегистрировавшись этим email на странице входа (Регистрация по приглашению).</div>
+      </div>
       <div class="card"><div class="card-head">Участники</div>
-      ${(orgs||[]).length ? `<table><thead><tr><th>Название</th><th>Тип</th><th>Страна</th><th>Статус</th><th>ID</th></tr></thead><tbody>
-        ${orgs.map(o => `<tr><td>${esc(o.name)}</td><td><span class="badge badge--${ORG_BADGE[o.type]||'gray'}">${esc(o.type)}</span></td><td>${esc(o.country||'—')}</td><td>${badge(o.status)}</td><td class="id-cell">${short(o.id)}</td></tr>`).join('')}
+      ${(orgs||[]).length ? `<table><thead><tr><th>Название</th><th>Тип</th><th>Страна</th><th>Статус</th><th>Приглашения</th><th>ID</th><th></th></tr></thead><tbody>
+        ${orgs.map(o => `<tr><td>${esc(o.name)}</td><td><span class="badge badge--${ORG_BADGE[o.type]||'gray'}">${esc(o.type)}</span></td><td>${esc(o.country||'—')}</td><td>${badge(o.status)}</td><td class="hint">${(invByOrg[o.id]||[]).map(i=>esc(i.email)+' ('+(i.role==='superadmin'?'суперадмин':'админ')+')').join('<br>')||'—'}</td><td class="id-cell">${short(o.id)}</td><td style="text-align:right;white-space:nowrap">${o.status!=='active'?`<button class="btn btn--ghost btn--sm actBtn" data-id="${o.id}">Активировать</button>`:`<button class="btn btn--ghost btn--sm suspBtn" data-id="${o.id}">Приостановить</button>`} <button class="btn btn--ghost btn--sm invSaBtn" data-id="${o.id}" data-name="${esc(o.name)}">+ суперадмин</button></td></tr>`).join('')}
       </tbody></table>` : `<div class="card-empty">Нет организаций.</div>`}</div>`;
+    const oErr = (m) => { $('#oMsg').innerHTML = `<div class="notice notice--err">${esc(m)}</div>`; };
+    $('#orgBtn').onclick = async () => {
+      const name = ($('#orgName').value||'').trim();
+      const type = $('#orgType').value;
+      const country = ($('#orgCountry').value||'').trim() || null;
+      const email = ($('#orgEmail').value||'').trim().toLowerCase();
+      if (!name || !email) { oErr('Заполните название и email суперадмина.'); return; }
+      const b = $('#orgBtn'); b.disabled = true; b.textContent = 'Создаём…';
+      const { data: org, error } = await db.from('organization').insert({ name, type, country, status:'active' }).select().single();
+      if (error) { oErr(error.message); b.disabled = false; b.textContent = 'Создать + пригласить'; return; }
+      const { error: e2 } = await db.from('invitation').insert({ org_id: org.id, email, role:'superadmin', invited_by: state.user.id });
+      if (e2) oErr('Организация создана, но приглашение не отправлено: ' + e2.message);
+      renderPlatform();
+    };
+    document.querySelectorAll('.actBtn').forEach(b => b.onclick = async () => { const { error } = await db.from('organization').update({ status:'active' }).eq('id', b.dataset.id); if (error) oErr(error.message); else renderPlatform(); });
+    document.querySelectorAll('.suspBtn').forEach(b => b.onclick = async () => { const { error } = await db.from('organization').update({ status:'suspended' }).eq('id', b.dataset.id); if (error) oErr(error.message); else renderPlatform(); });
+    document.querySelectorAll('.invSaBtn').forEach(b => b.onclick = async () => {
+      const email = (prompt('Email суперадмина для «' + b.dataset.name + '»:') || '').trim().toLowerCase();
+      if (!email) return;
+      const { error } = await db.from('invitation').insert({ org_id: b.dataset.id, email, role:'superadmin', invited_by: state.user.id });
+      if (error) oErr(error.message); else renderPlatform();
+    });
   } else {
     const [{ data: orgs }, { data: reqs }, { data: lines }, { data: accr }, { data: inv }] = await Promise.all([
       db.from('organization').select('id,name,type'),
