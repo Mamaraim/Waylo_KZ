@@ -872,16 +872,39 @@ function ensureBkgStyle() {
 
 let catForm = null;          // null | {} (новая) | объект категории (правка)
 let bkProp = null, bkFrom = null;
+let propForm = null;  // null | {} (новый объект) | объект property (правка)
 
 async function hotelCats(active) {
   const main = $('#main'); if (!main) return;
-  const { data: props } = await db.from('property').select('id,name,city,kind').eq('org_id', active.orgId).order('name');
+  const { data: props } = await db.from('property').select('id,name,city,kind,star_category,is_active').eq('org_id', active.orgId).order('name');
   const propList = props || [];
   const pById = Object.fromEntries(propList.map(p => [p.id, p]));
   const ids = propList.map(p => p.id);
   const { data: cats } = ids.length ? await db.from('room_type').select('id,property_id,name,short_name,max_occupancy,default_availability,is_active').in('property_id', ids).order('name') : { data: [] };
   const list = cats || [];
+  const KINDS = { city:'Городской отель', resort:'Резорт' };
 
+  // ── форма объекта (property) ──
+  let propFormHtml = '';
+  if (propForm) {
+    const p = propForm, isEdit = !!p.id;
+    propFormHtml = `<div class="card" style="margin-bottom:14px"><div class="card-head">${isEdit ? 'Изменить объект' : 'Новый объект'}</div><div style="padding:14px">
+      <div class="row">
+        <div class="field" style="min-width:220px"><label>Название объекта</label><input class="input" id="pfName" value="${esc(p.name || '')}" placeholder="Hotel Registan Plaza"></div>
+        <div class="field" style="min-width:160px"><label>Город / локация</label><input class="input" id="pfCity" value="${esc(p.city || '')}" placeholder="Самарканд"></div>
+        <div class="field" style="width:170px"><label>Тип</label><select class="input" id="pfKind"><option value="city" ${p.kind !== 'resort' ? 'selected' : ''}>Городской отель</option><option value="resort" ${p.kind === 'resort' ? 'selected' : ''}>Резорт</option></select></div>
+        <div class="field" style="width:90px"><label>Звёзды</label><input type="number" min="1" max="5" class="input" id="pfStar" value="${p.star_category || 4}"></div>
+        <div class="field" style="width:90px"><label>Активен</label><select class="input" id="pfAct"><option value="1" ${p.is_active !== false ? 'selected' : ''}>Да</option><option value="0" ${p.is_active === false ? 'selected' : ''}>Нет</option></select></div>
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+        <button class="btn btn--primary btn--sm" id="pfSave">${isEdit ? 'Сохранить' : 'Создать объект'}</button>
+        <button class="btn btn--ghost btn--sm" id="pfCancel">Отмена</button>
+        <span id="pfMsg" class="hint"></span>
+      </div>
+    </div></div>`;
+  }
+
+  // ── форма категории (room_type) ──
   let formHtml = '';
   if (catForm) {
     const c = catForm, isEdit = !!c.id;
@@ -904,12 +927,27 @@ async function hotelCats(active) {
   }
 
   main.innerHTML = `
-    <div class="page-head"><div><h1>Категории номеров</h1><div class="sub">Типы номеров объекта: название, мест, доступность по умолчанию.</div></div>
+    <div class="page-head"><div><h1>Объекты и категории</h1><div class="sub">Сначала заведите объект (здание отеля/резорт), затем — категории номеров в нём.</div></div>
+      <button class="btn btn--primary" id="propAdd">+ Добавить объект</button></div>
+    ${propFormHtml}
+    <div class="card"><div class="card-head">Объекты (${propList.length})</div>
+    ${propList.length ? `<table><thead><tr><th>Вкл.</th><th>Название</th><th>Локация</th><th>Тип</th><th style="text-align:center">★</th><th></th></tr></thead><tbody>
+      ${propList.map(p => `<tr>
+        <td>${p.is_active !== false ? '<span class="badge badge--accent">вкл</span>' : '<span class="badge">выкл</span>'}</td>
+        <td><b>${esc(p.name)}</b></td>
+        <td class="hint">${esc(p.city || '—')}</td>
+        <td class="hint">${esc(KINDS[p.kind] || p.kind || '—')}</td>
+        <td class="mono" style="text-align:center">${p.star_category || '—'}</td>
+        <td style="text-align:right"><button class="btn btn--ghost btn--sm propEdit" data-id="${p.id}">Изменить</button></td>
+      </tr>`).join('')}
+    </tbody></table>` : `<div class="card-empty">Объектов пока нет. Нажмите «Добавить объект».</div>`}</div>
+
+    <div class="page-head" style="margin-top:18px"><div><h2 style="margin:0;font-size:17px">Категории номеров</h2></div>
       ${propList.length ? `<button class="btn btn--primary" id="catAdd">+ Добавить категорию</button>` : ''}</div>
-    ${propList.length ? '' : `<div class="card"><div class="card-empty">У вашей организации нет объектов. Объект/резорт заводит платформа в каталоге.</div></div>`}
     ${formHtml}
-    ${propList.length ? `<div class="card"><div class="card-head">Список категорий</div>
-    ${list.length ? `<table><thead><tr><th>Вкл.</th><th>Объект</th><th>Название</th><th>Сокр.</th><th style="text-align:center">Мест</th><th style="text-align:center">Дефолт</th><th></th></tr></thead><tbody>
+    <div class="card"><div class="card-head">Список категорий</div>
+    ${!propList.length ? `<div class="card-empty">Сначала добавьте объект — категории создаются внутри объекта.</div>`
+      : list.length ? `<table><thead><tr><th>Вкл.</th><th>Объект</th><th>Название</th><th>Сокр.</th><th style="text-align:center">Мест</th><th style="text-align:center">Дефолт</th><th></th></tr></thead><tbody>
       ${list.map(c => `<tr>
         <td>${c.is_active ? '<span class="badge badge--accent">вкл</span>' : '<span class="badge">выкл</span>'}</td>
         <td class="hint">${esc(pById[c.property_id] && pById[c.property_id].name || '—')}</td>
@@ -919,11 +957,33 @@ async function hotelCats(active) {
         <td class="mono" style="text-align:center">${c.default_availability || 0}</td>
         <td style="text-align:right;white-space:nowrap"><button class="btn btn--ghost btn--sm catEdit" data-id="${c.id}">Изменить</button> <button class="btn btn--ghost btn--sm catDel" data-id="${c.id}">✕</button></td>
       </tr>`).join('')}
-    </tbody></table>` : `<div class="card-empty">Категорий пока нет. Нажмите «Добавить категорию».</div>`}</div>` : ''}`;
+    </tbody></table>` : `<div class="card-empty">Категорий пока нет. Нажмите «Добавить категорию».</div>`}</div>`;
 
-  const add = $('#catAdd'); if (add) add.onclick = () => { catForm = {}; hotelCats(active); };
+  // объект: обработчики
+  const padd = $('#propAdd'); if (padd) padd.onclick = () => { propForm = {}; catForm = null; hotelCats(active); };
+  const pcancel = $('#pfCancel'); if (pcancel) pcancel.onclick = () => { propForm = null; hotelCats(active); };
+  document.querySelectorAll('.propEdit').forEach(b => b.onclick = () => { propForm = propList.find(x => x.id === b.dataset.id) || {}; catForm = null; hotelCats(active); });
+  const psave = $('#pfSave'); if (psave) psave.onclick = async () => {
+    const name = ($('#pfName').value || '').trim();
+    if (!name) { $('#pfMsg').innerHTML = '<span style="color:var(--red)">Укажите название объекта.</span>'; return; }
+    const payload = {
+      name,
+      city: ($('#pfCity').value || '').trim() || null,
+      kind: $('#pfKind').value,
+      star_category: Math.min(5, Math.max(1, parseInt($('#pfStar').value || '4', 10))),
+      is_active: $('#pfAct').value === '1',
+    };
+    let error;
+    if (propForm.id) ({ error } = await db.from('property').update(payload).eq('id', propForm.id));
+    else { payload.org_id = active.orgId; ({ error } = await db.from('property').insert(payload)); }
+    if (error) { $('#pfMsg').innerHTML = `<span style="color:var(--red)">${esc(error.message)}</span>`; return; }
+    propForm = null; hotelCats(active);
+  };
+
+  // категория: обработчики
+  const add = $('#catAdd'); if (add) add.onclick = () => { catForm = {}; propForm = null; hotelCats(active); };
   const cancel = $('#cfCancel'); if (cancel) cancel.onclick = () => { catForm = null; hotelCats(active); };
-  document.querySelectorAll('.catEdit').forEach(b => b.onclick = () => { catForm = list.find(x => x.id === b.dataset.id) || {}; hotelCats(active); });
+  document.querySelectorAll('.catEdit').forEach(b => b.onclick = () => { catForm = list.find(x => x.id === b.dataset.id) || {}; propForm = null; hotelCats(active); });
   document.querySelectorAll('.catDel').forEach(b => b.onclick = async () => {
     const c = list.find(x => x.id === b.dataset.id);
     if (!confirm('Удалить категорию «' + (c && c.name || '') + '»? Будут удалены её доступность и тарифы.')) return;
