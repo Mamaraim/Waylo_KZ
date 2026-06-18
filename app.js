@@ -34,6 +34,7 @@ const typeBadge = (t) => t === 'HOTEL' ? `<span class="badge badge--accent">от
 /* ── state ───────────────────────────────────────────────────────────────── */
 let state = { user:null, contexts:[], isPlatform:false, activeKey:null, tab:null, openReq:null };
 let loginMode = 'signin';
+let pendingOnboard = null;  // {name,type,country} | null — намерение создать компанию при регистрации
 
 async function loadProfile() {
   const { data: mems } = await db.from('membership').select('role, org_id, organization(id,type,name,country)');
@@ -55,7 +56,7 @@ let _authUid = null;
 db.auth.onAuthStateChange(async (_e, session) => {
   const user = session?.user || null;
   if (!user) {                                  // выход
-    _authUid = null;
+    _authUid = null; pendingOnboard = null;
     state.user = null; state.contexts = []; state.isPlatform = false;
     state.activeKey = null; state.tab = null; state.openReq = null;
     render(); return;
@@ -69,6 +70,12 @@ db.auth.onAuthStateChange(async (_e, session) => {
   state.tab = null; state.openReq = null;
   try { await db.rpc('accept_pending_invites'); } catch (_e) {}
   await loadProfile();
+  // нет организации, но есть намерение зарегистрировать компанию → создаём её
+  if (!state.contexts.length && pendingOnboard) {
+    try { await db.rpc('onboard_organization', { p_name: pendingOnboard.name, p_type: pendingOnboard.type, p_country: pendingOnboard.country }); } catch (_e) {}
+    pendingOnboard = null;
+    await loadProfile();
+  }
   render();
 });
 
@@ -97,7 +104,7 @@ function renderLogin() {
       <button class="btn btn--primary" id="loginBtn">Войти</button>
       <div class="login-creds">Тест (пароль <code>waylo-test-pass</code>): <code id="segCred">${esc(seg.email)}</code></div>
       <div class="op-link">Оператор Waylo — <a id="opLink">platform@waylo.test</a></div>
-      <div class="op-link" style="margin-top:6px">Впервые здесь? <a id="toSignup">Регистрация по приглашению →</a></div>
+      <div class="op-link" style="margin-top:6px">Впервые здесь? <a id="toSignup">Регистрация компании →</a></div>
     </form></div>`;
   const pick = (s) => {
     seg = s;
@@ -116,16 +123,27 @@ function renderLogin() {
   };
 }
 
-/* ── регистрация по приглашению ────────────────────────────────────────────
-   Статический фронт не создаёт чужие аккаунты (нет service-ключа). Приглашённый
-   регистрируется сам тем email, на который пришло приглашение; членство в
-   организации материализуется при входе через RPC accept_pending_invites(). */
+/* ── регистрация: новая компания или вход по приглашению ────────────────────
+   Пользователь выбирает тип компании (DMC-клиент / Отель-резорт / Транспорт).
+   После входа: если есть приглашение в существующую организацию — оно
+   принимается (accept_pending_invites), а введённые тип/название игнорируются.
+   Иначе создаётся новая организация выбранного типа через RPC
+   onboard_organization, и регистрант становится её суперадмином. */
 function renderSignup() {
   app.innerHTML = `
     <div class="login-wrap"><form class="login-card" id="suForm">
       <div class="brand">Waylo<span class="chev">›</span><span class="kz">KZ</span></div>
-      <div class="tag">Регистрация по приглашению</div>
-      <div class="seg-sub">Зарегистрируйтесь email, на который вам выслали приглашение. Доступ к кабинету появится автоматически после входа.</div>
+      <div class="tag">Регистрация компании</div>
+      <div class="seg-sub">Выберите, кто вы — создадим кабинет нужного типа, вы станете суперадмином. Если вас пригласили в существующую компанию, доступ выдастся по приглашению автоматически (тип и название можно не трогать).</div>
+      <div class="field"><label>Тип компании</label>
+        <select class="input" id="suType">
+          <option value="DMC">DMC / турагентство (клиент)</option>
+          <option value="HOTEL">Отель / резорт (поставщик)</option>
+          <option value="TRANSPORT">Транспортная компания (поставщик)</option>
+        </select>
+      </div>
+      <div class="field"><label>Название компании</label><input class="input" id="suName" placeholder="Например: Silk Road DMC"></div>
+      <div class="field"><label>Страна</label><input class="input" id="suCountry" placeholder="KZ / UZ"></div>
       <div class="field"><label>Почта</label><input type="email" id="suEmail" autocomplete="username" placeholder="you@company.com" required></div>
       <div class="field"><label>Пароль</label><input type="password" id="suPass" autocomplete="new-password" placeholder="не менее 6 символов" required></div>
       <div class="field"><label>Повтор пароля</label><input type="password" id="suPass2" autocomplete="new-password" required></div>
@@ -136,19 +154,24 @@ function renderSignup() {
   $('#toSignin').onclick = () => { loginMode = 'signin'; renderLogin(); };
   $('#suForm').onsubmit = async (e) => {
     e.preventDefault();
+    const type = $('#suType').value;
+    const name = ($('#suName').value || '').trim();
+    const country = ($('#suCountry').value || '').trim() || null;
     const email = ($('#suEmail').value || '').trim().toLowerCase();
     const p1 = $('#suPass').value, p2 = $('#suPass2').value;
+    if (!name) { $('#suErr').innerHTML = `<div class="notice notice--err">Укажите название компании (или, если вас пригласили, попросите суперадмина пригласить именно этот email).</div>`; return; }
     if (p1.length < 6) { $('#suErr').innerHTML = `<div class="notice notice--err">Пароль не короче 6 символов.</div>`; return; }
     if (p1 !== p2) { $('#suErr').innerHTML = `<div class="notice notice--err">Пароли не совпадают.</div>`; return; }
     const btn = $('#suBtn'); btn.disabled = true; btn.textContent = 'Регистрируем…';
+    // намерение создать компанию: применится после входа, только если приглашения нет
+    pendingOnboard = { name, type, country };
     const { data, error } = await db.auth.signUp({ email, password: p1 });
-    if (error) { $('#suErr').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; btn.disabled = false; btn.textContent = 'Зарегистрироваться'; return; }
+    if (error) { pendingOnboard = null; $('#suErr').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; btn.disabled = false; btn.textContent = 'Зарегистрироваться'; return; }
     if (data && data.session) {
-      // мгновенный вход (подтверждение почты выключено) → onAuthStateChange примет приглашения и отрисует кабинет
       const { error: e2 } = await db.auth.signInWithPassword({ email, password: p1 });
-      if (e2) { $('#suErr').innerHTML = `<div class="notice notice--err">${esc(e2.message)}</div>`; btn.disabled = false; btn.textContent = 'Зарегистрироваться'; }
+      if (e2) { pendingOnboard = null; $('#suErr').innerHTML = `<div class="notice notice--err">${esc(e2.message)}</div>`; btn.disabled = false; btn.textContent = 'Зарегистрироваться'; }
     } else {
-      // включено подтверждение почты — сессии пока нет
+      pendingOnboard = null;
       $('#suErr').innerHTML = `<div class="notice">Аккаунт создан. Подтвердите почту по ссылке из письма, затем войдите.</div>`;
       btn.disabled = false; btn.textContent = 'Зарегистрироваться';
       loginMode = 'signin';
@@ -1295,10 +1318,109 @@ async function transportAvail(active) {
 
 /* ── PLATFORM ────────────────────────────────────────────────────────────── */
 const ORG_BADGE = { DMC:'blue', HOTEL:'green', TRANSPORT:'amber', PLATFORM:'accent' };
+
+let priceForm = null;  // null | {room_type_id, id?, ...} — форма тарифа номера (только платформа)
+
+/* ── Платформа · Цены ───────────────────────────────────────────────────────
+   По RLS (0002) тарифы room_rate пишет ТОЛЬКО платформа; DMC видит лишь sell
+   через room_rate_public. Здесь платформа задаёт на каждую категорию:
+   net (контракт с отелем) и sell (витрина для DMC); спред = sell − net скрыт
+   от DMC. Ограничения БД: net ≤ sell, и если задан retail, то sell < retail. */
+async function platformPricing() {
+  const main = $('#main'); if (!main) return;
+  const [{ data: props }, { data: types }, { data: rates, error }] = await Promise.all([
+    db.from('property').select('id,name,city,org_id,is_active').order('name'),
+    db.from('room_type').select('id,property_id,name,short_name,is_active').order('name'),
+    db.from('room_rate').select('id,room_type_id,valid_from,valid_to,net_price,sell_price,supplier_retail,sgl_supplement,currency').order('valid_from'),
+  ]);
+  if (error) { main.innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; return; }
+  const pById = Object.fromEntries((props || []).map(p => [p.id, p]));
+  const ratesByRt = {}; (rates || []).forEach(r => { (ratesByRt[r.room_type_id] = ratesByRt[r.room_type_id] || []).push(r); });
+  const typeList = (types || []).filter(t => pById[t.property_id]);
+  // группируем категории по объекту
+  const byProp = {};
+  typeList.forEach(t => { (byProp[t.property_id] = byProp[t.property_id] || []).push(t); });
+  const propIds = Object.keys(byProp).sort((a, b) => (pById[a].name || '').localeCompare(pById[b].name || '', 'ru'));
+
+  let formHtml = '';
+  if (priceForm) {
+    const f = priceForm, isEdit = !!f.id;
+    const rt = typeList.find(t => t.id === f.room_type_id);
+    const pr = rt && pById[rt.property_id];
+    formHtml = `<div class="card" style="margin-bottom:14px"><div class="card-head">${isEdit ? 'Изменить тариф' : 'Новый тариф'} · ${esc(pr ? pr.name : '')} — ${esc(rt ? rt.name : '')}</div><div style="padding:14px">
+      <div class="row">
+        <div class="field" style="width:130px"><label>Net (контракт)</label><input type="number" min="0" step="0.01" class="input" id="prNet" value="${f.net_price != null ? f.net_price : ''}" placeholder="40"></div>
+        <div class="field" style="width:130px"><label>Sell (для DMC)</label><input type="number" min="0" step="0.01" class="input" id="prSell" value="${f.sell_price != null ? f.sell_price : ''}" placeholder="50"></div>
+        <div class="field" style="width:140px"><label>Retail (опц.)</label><input type="number" min="0" step="0.01" class="input" id="prRetail" value="${f.supplier_retail != null ? f.supplier_retail : ''}" placeholder="—"></div>
+        <div class="field" style="width:130px"><label>SGL-надбавка</label><input type="number" min="0" step="0.01" class="input" id="prSgl" value="${f.sgl_supplement != null ? f.sgl_supplement : 0}"></div>
+        <div class="field" style="width:90px"><label>Валюта</label><input class="input" id="prCur" value="${esc(f.currency || 'USD')}"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div class="field" style="width:160px"><label>Действует с</label><input type="date" class="input" id="prFrom" value="${esc(f.valid_from || '2026-01-01')}"></div>
+        <div class="field" style="width:160px"><label>по</label><input type="date" class="input" id="prTo" value="${esc(f.valid_to || '2026-12-31')}"></div>
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+        <button class="btn btn--primary btn--sm" id="prSave">${isEdit ? 'Сохранить' : 'Создать тариф'}</button>
+        <button class="btn btn--ghost btn--sm" id="prCancel">Отмена</button>
+        <span id="prMsg" class="hint"></span>
+      </div>
+      <div class="hint" style="margin-top:8px">DMC увидит только Sell. Спред (Sell − Net) — маржа Waylo, скрыта от DMC. Если задан Retail, требуется Sell &lt; Retail.</div>
+    </div></div>`;
+  }
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Цены</h1><div class="sub">Тарифы на категории номеров. Платформа задаёт net/sell; DMC видит только sell.</div></div></div>
+    <div id="prTop"></div>
+    ${formHtml}
+    ${propIds.length ? propIds.map(pid => {
+      const p = pById[pid];
+      return `<div class="card" style="margin-bottom:12px"><div class="card-head">${esc(p.name)} · <span class="hint">${esc(p.city || '')}</span></div>
+      <table><thead><tr><th>Категория</th><th>Период</th><th style="text-align:right">Net</th><th style="text-align:right">Sell (DMC)</th><th style="text-align:right">Спред</th><th style="text-align:right">SGL</th><th></th></tr></thead><tbody>
+      ${byProp[pid].map(rt => {
+        const rs = ratesByRt[rt.id] || [];
+        const addBtn = `<button class="btn btn--ghost btn--sm prAdd" data-rt="${rt.id}">+ тариф</button>`;
+        if (!rs.length) return `<tr><td><b>${esc(rt.name)}</b>${rt.is_active === false ? ' <span class="badge">выкл</span>' : ''}</td><td colspan="5" class="card-empty" style="padding:8px">Цена не задана — DMC не видит эту категорию</td><td style="text-align:right">${addBtn}</td></tr>`;
+        return rs.map((r, i) => `<tr><td>${i === 0 ? `<b>${esc(rt.name)}</b>` : ''}</td><td class="hint">${esc(r.valid_from)} — ${esc(r.valid_to)}</td><td class="price" style="text-align:right">${money(r.net_price, r.currency)}</td><td class="price" style="text-align:right">${money(r.sell_price, r.currency)}</td><td class="price" style="text-align:right"><b>${money(Number(r.sell_price) - Number(r.net_price), r.currency)}</b></td><td class="mono" style="text-align:right">${money(r.sgl_supplement, r.currency)}</td><td style="text-align:right;white-space:nowrap"><button class="btn btn--ghost btn--sm prEdit" data-id="${r.id}">Изменить</button> <button class="btn btn--ghost btn--sm prDel" data-id="${r.id}">✕</button>${i === rs.length - 1 ? ' ' + addBtn : ''}</td></tr>`).join('');
+      }).join('')}
+      </tbody></table></div>`;
+    }).join('') : `<div class="card"><div class="card-empty">Пока нет категорий. Их создаёт отель/резорт в своём кабинете (вкладка «Категории»).</div></div>`}`;
+
+  const allRates = rates || [];
+  const padd = (rtId) => { priceForm = { room_type_id: rtId, sgl_supplement: 0, currency: 'USD', valid_from: '2026-01-01', valid_to: '2026-12-31' }; platformPricing(); };
+  document.querySelectorAll('.prAdd').forEach(b => b.onclick = () => padd(b.dataset.rt));
+  document.querySelectorAll('.prEdit').forEach(b => b.onclick = () => { priceForm = allRates.find(r => r.id === b.dataset.id) || null; platformPricing(); });
+  document.querySelectorAll('.prDel').forEach(b => b.onclick = async () => {
+    if (!confirm('Удалить тариф? DMC перестанет видеть эту цену.')) return;
+    const { error } = await db.from('room_rate').delete().eq('id', b.dataset.id);
+    if (error) $('#prTop').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; else { priceForm = null; platformPricing(); }
+  });
+  const cancel = $('#prCancel'); if (cancel) cancel.onclick = () => { priceForm = null; platformPricing(); };
+  const save = $('#prSave'); if (save) save.onclick = async () => {
+    const net = parseFloat($('#prNet').value), sell = parseFloat($('#prSell').value);
+    const retailRaw = ($('#prRetail').value || '').trim();
+    const retail = retailRaw === '' ? null : parseFloat(retailRaw);
+    const sgl = parseFloat($('#prSgl').value || '0') || 0;
+    const cur = ($('#prCur').value || 'USD').trim().toUpperCase();
+    const from = $('#prFrom').value, to = $('#prTo').value;
+    const msg = (t) => { $('#prMsg').innerHTML = `<span style="color:var(--red)">${esc(t)}</span>`; };
+    if (!(net >= 0) || !(sell >= 0)) return msg('Укажите net и sell.');
+    if (net > sell) return msg('Net не может быть больше Sell.');
+    if (retail != null && !(sell < retail)) return msg('Sell должен быть меньше Retail.');
+    if (!from || !to || from > to) return msg('Период задан неверно.');
+    const payload = { net_price: net, sell_price: sell, supplier_retail: retail, sgl_supplement: sgl, currency: cur, valid_from: from, valid_to: to };
+    let error;
+    if (priceForm.id) ({ error } = await db.from('room_rate').update(payload).eq('id', priceForm.id));
+    else { payload.room_type_id = priceForm.room_type_id; ({ error } = await db.from('room_rate').insert(payload)); }
+    if (error) return msg(error.message);
+    priceForm = null; platformPricing();
+  };
+}
+
 async function renderPlatform() {
   if (!state.tab) state.tab = 'orgs';
-  navShell('Платформа · Waylo', [{ id:'orgs', label:'Организации' }, { id:'invoices', label:'Деньги' }]);
+  navShell('Платформа · Waylo', [{ id:'orgs', label:'Организации' }, { id:'pricing', label:'Цены' }, { id:'invoices', label:'Деньги' }]);
   const main = $('#main'); if (!main) return;
+  if (state.tab === 'pricing') return platformPricing();
   if (state.tab === 'orgs') {
     const [{ data: orgs }, { data: invs }] = await Promise.all([
       db.from('organization').select('*').order('type'),
