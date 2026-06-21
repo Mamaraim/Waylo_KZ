@@ -225,8 +225,9 @@ function navShell(kicker, tabs) {
 /* ── DMC ─────────────────────────────────────────────────────────────────── */
 async function renderDmc(active) {
   if (!state.tab) state.tab = 'catalog';
-  navShell('DMC · ' + active.orgName, [{ id:'catalog', label:'Каталог' }, { id:'requests', label:'Туры' }, { id:'finance', label:'Финансы' }]);
+  navShell('DMC · ' + active.orgName, [{ id:'catalog', label:'Каталог' }, { id:'requests', label:'Туры' }, { id:'pay', label:'Оплаты' }, { id:'finance', label:'Финансы' }]);
   if (state.tab === 'catalog') dmcCatalog();
+  else if (state.tab === 'pay') dmcPayments(active);
   else if (state.tab === 'finance') dmcFinance(active);
   else dmcRequests(active);
 }
@@ -1457,12 +1458,114 @@ async function platformLog() {
     </tbody></table>` : `<div class="card-empty">Событий пока нет.</div>`}</div>`;
 }
 
+/* ── Оплаты (MVP, 0018) ──────────────────────────────────────────────────────
+   Сумма к оплате = Σ(sell × кол-во × ночи) + сервисный сбор (platform_setting).
+   DMC выставляет счёт (payment_code), платформа (фин.) отмечает оплату вручную —
+   через apply_payment_event (единый шов; банк/n8n позже в ту же точку). */
+const _nights = (l) => Math.max(1, Math.round((new Date(l.to_date) - new Date(l.from_date)) / 86400000));
+function _feeOf(fee, linesTotal) {
+  if (!fee) return 0;
+  return fee.fee_type === 'fixed' ? (Number(fee.fee_value) || 0) : Math.round(linesTotal * (Number(fee.fee_value) || 0)) / 100;
+}
+
+async function dmcPayments(active) {
+  const main = $('#main'); if (!main) return;
+  const [{ data: reqs }, { data: setting }] = await Promise.all([
+    db.from('request').select('id,name,client_name,status,payment_code,due_date,currency,created_at').eq('dmc_org_id', active.orgId).order('created_at', { ascending: false }),
+    db.from('platform_setting').select('value').eq('key', 'service_fee'),
+  ]);
+  const ids = (reqs || []).map(r => r.id);
+  const [{ data: lines }, { data: events }] = await Promise.all([
+    ids.length ? db.from('request_line').select('request_id,sell_price,quantity,from_date,to_date').in('request_id', ids) : Promise.resolve({ data: [] }),
+    ids.length ? db.from('payment_event').select('request_id,amount,status').in('request_id', ids) : Promise.resolve({ data: [] }),
+  ]);
+  const fee = (setting && setting[0] && setting[0].value) || { fee_type: 'percent', fee_value: 0 };
+  const linesBy = {}; (lines || []).forEach(l => { (linesBy[l.request_id] = linesBy[l.request_id] || []).push(l); });
+  const paidBy = {}; (events || []).forEach(e => { if (e.status === 'paid') paidBy[e.request_id] = (paidBy[e.request_id] || 0) + Number(e.amount || 0); });
+  const lt = (id) => (linesBy[id] || []).reduce((s, l) => s + Number(l.sell_price || 0) * l.quantity * _nights(l), 0);
+  const total = (id) => { const x = lt(id); return x + _feeOf(fee, x); };
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Оплаты</h1><div class="sub">Счёт к оплате по туру: проживание + транспорт + сервисный сбор Waylo. Выставьте счёт и оплатите по коду.</div></div></div>
+    <div id="payMsg"></div>
+    <div class="card"><div class="card-head">Туры и счета</div>
+    ${(reqs || []).length ? `<table><thead><tr><th>Тур</th><th>Клиент</th><th style="text-align:right">Линии</th><th style="text-align:right">Сбор</th><th style="text-align:right">К оплате</th><th>Код платежа</th><th>Статус</th><th></th></tr></thead><tbody>
+      ${reqs.map(r => { const x = lt(r.id), f = _feeOf(fee, x), t = x + f, paid = paidBy[r.id] || 0; const isPaid = t > 0 && paid >= t;
+        return `<tr>
+          <td><b>${esc(r.name || '—')}</b></td>
+          <td class="hint">${esc(r.client_name || '—')}</td>
+          <td class="price" style="text-align:right">${money(x, r.currency)}</td>
+          <td class="price" style="text-align:right">${money(f, r.currency)}</td>
+          <td class="price" style="text-align:right"><b>${money(t, r.currency)}</b></td>
+          <td class="mono">${r.payment_code ? esc(r.payment_code) : '<span class="hint">—</span>'}${r.due_date ? `<div class="hint">до ${esc(r.due_date)}</div>` : ''}</td>
+          <td>${isPaid ? '<span class="badge badge--green">оплачено</span>' : r.payment_code ? '<span class="badge badge--amber">ожидает оплаты</span>' : '<span class="badge badge--gray">счёт не выставлен</span>'}</td>
+          <td style="text-align:right">${!r.payment_code && t > 0 ? `<button class="btn btn--primary btn--sm issInv" data-req="${r.id}">Выставить счёт</button>` : ''}</td>
+        </tr>`; }).join('')}
+    </tbody></table>` : `<div class="card-empty">Туров пока нет. Создайте тур во вкладке «Туры» и забронируйте.</div>`}</div>`;
+
+  document.querySelectorAll('.issInv').forEach(b => b.onclick = async () => {
+    b.disabled = true; b.textContent = 'Выставляем…';
+    const { error } = await db.rpc('issue_request_invoice', { p_request: b.dataset.req });
+    if (error) { $('#payMsg').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; b.disabled = false; b.textContent = 'Выставить счёт'; }
+    else dmcPayments(active);
+  });
+}
+
+async function platformPayments() {
+  const main = $('#main'); if (!main) return;
+  const [{ data: reqs }, { data: orgs }, { data: setting }] = await Promise.all([
+    db.from('request').select('id,name,dmc_org_id,payment_code,due_date,currency,created_at').not('payment_code', 'is', null).order('created_at', { ascending: false }),
+    db.from('organization').select('id,name'),
+    db.from('platform_setting').select('value').eq('key', 'service_fee'),
+  ]);
+  const ids = (reqs || []).map(r => r.id);
+  const [{ data: lines }, { data: events }] = await Promise.all([
+    ids.length ? db.from('request_line').select('request_id,sell_price,quantity,from_date,to_date').in('request_id', ids) : Promise.resolve({ data: [] }),
+    ids.length ? db.from('payment_event').select('request_id,amount,status').in('request_id', ids) : Promise.resolve({ data: [] }),
+  ]);
+  const fee = (setting && setting[0] && setting[0].value) || { fee_type: 'percent', fee_value: 0 };
+  const orgName = Object.fromEntries((orgs || []).map(o => [o.id, o.name]));
+  const linesBy = {}; (lines || []).forEach(l => { (linesBy[l.request_id] = linesBy[l.request_id] || []).push(l); });
+  const paidBy = {}; (events || []).forEach(e => { if (e.status === 'paid') paidBy[e.request_id] = (paidBy[e.request_id] || 0) + Number(e.amount || 0); });
+  const lt = (id) => (linesBy[id] || []).reduce((s, l) => s + Number(l.sell_price || 0) * l.quantity * _nights(l), 0);
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Оплаты</h1><div class="sub">Выставленные счета покупателям. Отметка оплаты — единая точка фиксации (apply_payment_event); позже сюда подключится банк/n8n.</div></div></div>
+    <div id="ppMsg"></div>
+    <div class="card"><div class="card-head">Счета (${(reqs || []).length})</div>
+    ${(reqs || []).length ? `<table><thead><tr><th>Тур</th><th>DMC</th><th>Код</th><th style="text-align:right">К оплате</th><th style="text-align:right">Оплачено</th><th>Статус</th><th></th></tr></thead><tbody>
+      ${reqs.map(r => { const x = lt(r.id), t = x + _feeOf(fee, x), paid = paidBy[r.id] || 0; const isPaid = t > 0 && paid >= t;
+        return `<tr>
+          <td><b>${esc(r.name || '—')}</b>${r.due_date ? ` <span class="hint">до ${esc(r.due_date)}</span>` : ''}</td>
+          <td>${esc(orgName[r.dmc_org_id] || '—')}</td>
+          <td class="mono">${esc(r.payment_code || '—')}</td>
+          <td class="price" style="text-align:right"><b>${money(t, r.currency)}</b></td>
+          <td class="price" style="text-align:right">${money(paid, r.currency)}</td>
+          <td>${isPaid ? '<span class="badge badge--green">оплачено</span>' : '<span class="badge badge--amber">ожидает</span>'}</td>
+          <td style="text-align:right">${isPaid ? '✓' : `<button class="btn btn--primary btn--sm markPaid" data-req="${r.id}" data-amt="${(t - paid).toFixed(2)}" data-cur="${esc(r.currency || 'USD')}">Отметить оплачено</button>`}</td>
+        </tr>`; }).join('')}
+    </tbody></table>` : `<div class="card-empty">Выставленных счетов пока нет.</div>`}</div>`;
+
+  document.querySelectorAll('.markPaid').forEach(b => b.onclick = async () => {
+    const def = b.dataset.amt;
+    const raw = prompt('Сумма поступившей оплаты:', def);
+    if (raw == null) return;
+    const amt = parseFloat(raw);
+    if (!(amt > 0)) { $('#ppMsg').innerHTML = `<div class="notice notice--err">Сумма должна быть больше 0.</div>`; return; }
+    b.disabled = true; b.textContent = 'Проводим…';
+    const { error } = await db.rpc('apply_payment_event', { p_request: b.dataset.req, p_amount: amt, p_currency: b.dataset.cur, p_source: 'manual' });
+    if (error) { $('#ppMsg').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; b.disabled = false; b.textContent = 'Отметить оплачено'; }
+    else platformPayments();
+  });
+}
+
 async function renderPlatform() {
   if (!state.tab) state.tab = 'orgs';
-  navShell('Платформа · Waylo', [{ id:'orgs', label:'Организации' }, { id:'pricing', label:'Цены' }, { id:'invoices', label:'Деньги' }, { id:'log', label:'Журнал' }]);
+  navShell('Платформа · Waylo', [{ id:'orgs', label:'Организации' }, { id:'pricing', label:'Цены' }, { id:'payments', label:'Оплаты' }, { id:'invoices', label:'Деньги' }, { id:'log', label:'Журнал' }]);
   const main = $('#main'); if (!main) return;
   if (state.tab === 'pricing') return platformPricing();
   if (state.tab === 'log') return platformLog();
+  if (state.tab === 'payments') return platformPayments();
   if (state.tab === 'orgs') {
     const [{ data: orgs }, { data: invs }] = await Promise.all([
       db.from('organization').select('*').order('type'),
