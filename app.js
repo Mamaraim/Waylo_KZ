@@ -611,19 +611,24 @@ async function cabinetTeam(active) {
 
 async function supplierConfirm(active, word) {
   const main = $('#main'); if (!main) return;
-  const { data: lines } = await db.from('request_line').select('*').eq('supplier_org_id', active.orgId).order('created_at', { ascending:false });
-  const pending = (lines || []).filter(l => l.confirmation === 'pending');
-  const confirmed = (lines || []).filter(l => l.confirmation === 'confirmed');
+  const { data: lines } = await db.from('request_line').select('*').eq('supplier_org_id', active.orgId).order('created_at', { ascending: false });
+  const all = lines || [];
+  const pending = all.filter(l => l.confirmation === 'pending');
+  const confirmed = all.filter(l => l.confirmation === 'confirmed');
+  // финансовое основание по заявкам (0019): is_request_paid через RPC (definer обходит RLS)
+  const reqIds = [...new Set(all.map(l => l.request_id).filter(Boolean))];
+  const paidArr = await Promise.all(reqIds.map(async rid => { const { data } = await db.rpc('is_request_paid', { p_request: rid }); return [rid, data === true]; }));
+  const paidByReq = Object.fromEntries(paidArr);
   main.innerHTML = `
-    <div class="page-head"><div><h1>Подтверждения</h1><div class="sub">Запросы от DMC на ваши услуги. Подтверждение фиксирует холд${word==='отель'?' и начисляет спред':''}.</div></div></div>
+    <div class="page-head"><div><h1>Подтверждения</h1><div class="sub">Запросы от DMC. Подтверждение возможно только после оплаты заявки${word === 'отель' ? '; фиксирует холд и начисляет спред' : ' и фиксирует холд'}.</div></div></div>
     <div class="stat-row"><div class="stat"><div class="n">${pending.length}</div><div class="l">ждут подтверждения</div></div><div class="stat"><div class="n">${confirmed.length}</div><div class="l">подтверждено</div></div></div>
     <div id="cMsg"></div>
     <div class="card"><div class="card-head">Линии заявок</div>
-    ${(lines||[]).length ? `<table><thead><tr><th>Линия</th><th>Ресурс</th><th>Период</th><th>Кол-во</th><th>Цена</th><th>Статус</th><th></th></tr></thead><tbody>
-      ${lines.map(l => `<tr><td class="id-cell">${short(l.id)}</td><td class="id-cell">${short(l.resource_id)}</td><td class="hint">${esc(l.from_date)} — ${esc(l.to_date)}</td><td class="mono">${l.quantity}</td><td class="price">${money(l.sell_price)}</td><td>${badge(l.confirmation)}</td><td style="text-align:right">${l.confirmation==='pending'?`<button class="btn btn--primary btn--sm confirmBtn" data-id="${l.id}">Подтвердить</button>`:''}</td></tr>`).join('')}
+    ${all.length ? `<table><thead><tr><th>Линия</th><th>Ресурс</th><th>Период</th><th>Кол-во</th><th>Цена</th><th>Оплата</th><th>Статус</th><th></th></tr></thead><tbody>
+      ${all.map(l => { const paid = paidByReq[l.request_id]; return `<tr><td class="id-cell">${short(l.id)}</td><td class="id-cell">${short(l.resource_id)}</td><td class="hint">${esc(l.from_date)} — ${esc(l.to_date)}</td><td class="mono">${l.quantity}</td><td class="price">${money(l.sell_price)}</td><td>${paid ? '<span class="badge badge--green">оплачено</span>' : '<span class="badge badge--amber">ожидает оплаты</span>'}</td><td>${badge(l.confirmation)}</td><td style="text-align:right">${l.confirmation === 'pending' ? (paid ? `<button class="btn btn--primary btn--sm confirmBtn" data-id="${l.id}">Подтвердить</button>` : '<span class="hint">оплата не получена</span>') : ''}</td></tr>`; }).join('')}
     </tbody></table>` : `<div class="card-empty">Пока нет запросов на ваши услуги.</div>`}</div>`;
   document.querySelectorAll('.confirmBtn').forEach(b => b.onclick = async () => {
-    const { error } = await db.rpc('confirm_hold', { p_request_line:b.dataset.id });
+    const { error } = await db.rpc('confirm_hold', { p_request_line: b.dataset.id });
     if (error) $('#cMsg').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`;
     else supplierConfirm(active, word);
   });
