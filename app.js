@@ -1416,11 +1416,30 @@ async function platformPricing() {
   };
 }
 
+/* ── Платформа · Журнал событий (read-only) ─────────────────────────────────
+   Лента из event_log (0016). RLS отдаёт её только платформе. Неизменяемая. */
+async function platformLog() {
+  const main = $('#main'); if (!main) return;
+  const { data: rows, error } = await db.from('event_log')
+    .select('id, actor, action, entity_type, entity_id, request_id, at')
+    .order('at', { ascending: false }).limit(200);
+  if (error) { main.innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; return; }
+  const ACT = { insert:['green','создано'], update:['blue','изменено'], delete:['red','удалено'] };
+  const fmt = (t) => { try { return new Date(t).toLocaleString('ru-RU'); } catch (_e) { return t; } };
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Журнал событий</h1><div class="sub">Неизменяемая лента действий: заявки, линии, брони, цены. Последние 200.</div></div></div>
+    <div class="card"><div class="card-head">События (${(rows || []).length})</div>
+    ${(rows || []).length ? `<table><thead><tr><th>Время</th><th>Кто</th><th>Действие</th><th>Сущность</th><th>Заявка</th></tr></thead><tbody>
+      ${rows.map(r => { const op = String(r.action || '').split('.').pop(); const [c, l] = ACT[op] || ['gray', op]; return `<tr><td class="hint">${esc(fmt(r.at))}</td><td>${esc(r.actor?.email || '—')}</td><td><span class="badge badge--${c}">${esc(l)}</span> <span class="hint">${esc(r.entity_type)}</span></td><td class="id-cell">${short(r.entity_id)}</td><td class="id-cell">${r.request_id ? short(r.request_id) : '—'}</td></tr>`; }).join('')}
+    </tbody></table>` : `<div class="card-empty">Событий пока нет.</div>`}</div>`;
+}
+
 async function renderPlatform() {
   if (!state.tab) state.tab = 'orgs';
-  navShell('Платформа · Waylo', [{ id:'orgs', label:'Организации' }, { id:'pricing', label:'Цены' }, { id:'invoices', label:'Деньги' }]);
+  navShell('Платформа · Waylo', [{ id:'orgs', label:'Организации' }, { id:'pricing', label:'Цены' }, { id:'invoices', label:'Деньги' }, { id:'log', label:'Журнал' }]);
   const main = $('#main'); if (!main) return;
   if (state.tab === 'pricing') return platformPricing();
+  if (state.tab === 'log') return platformLog();
   if (state.tab === 'orgs') {
     const [{ data: orgs }, { data: invs }] = await Promise.all([
       db.from('organization').select('*').order('type'),
