@@ -1320,39 +1320,42 @@ async function transportAvail(active) {
 const ORG_BADGE = { DMC:'blue', HOTEL:'green', TRANSPORT:'amber', PLATFORM:'accent' };
 
 let priceForm = null;  // null | {room_type_id, id?, ...} — форма тарифа номера (только платформа)
+let feeEdit = false;   // редактирование настройки сервисного сбора
 
 /* ── Платформа · Цены ───────────────────────────────────────────────────────
-   По RLS (0002) тарифы room_rate пишет ТОЛЬКО платформа; DMC видит лишь sell
-   через room_rate_public. Здесь платформа задаёт на каждую категорию:
-   net (контракт с отелем) и sell (витрина для DMC); спред = sell − net скрыт
-   от DMC. Ограничения БД: net ≤ sell, и если задан retail, то sell < retail. */
+   Прозрачная модель (0017): DMC видит НЕТТО (sell = net). Доход Waylo — отдельный
+   раскрытый сервисный сбор (platform_setting.service_fee), применяется к счёту в
+   0018. Здесь платформа задаёт нетто-цену на категорию и настраивает сбор. */
 async function platformPricing() {
   const main = $('#main'); if (!main) return;
-  const [{ data: props }, { data: types }, { data: rates, error }] = await Promise.all([
+  const [{ data: props }, { data: types }, { data: rates, error }, { data: settings }] = await Promise.all([
     db.from('property').select('id,name,city,org_id,is_active').order('name'),
     db.from('room_type').select('id,property_id,name,short_name,is_active').order('name'),
     db.from('room_rate').select('id,room_type_id,valid_from,valid_to,net_price,sell_price,supplier_retail,sgl_supplement,currency').order('valid_from'),
+    db.from('platform_setting').select('key,value').eq('key', 'service_fee'),
   ]);
   if (error) { main.innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; return; }
+  const fee = (settings && settings[0] && settings[0].value) || { fee_type: 'percent', fee_value: 0, currency: 'USD' };
+  const feeText = fee.fee_type === 'fixed' ? `${money(fee.fee_value, fee.currency || 'USD')} за бронь` : `${Number(fee.fee_value) || 0}% от нетто`;
   const pById = Object.fromEntries((props || []).map(p => [p.id, p]));
   const ratesByRt = {}; (rates || []).forEach(r => { (ratesByRt[r.room_type_id] = ratesByRt[r.room_type_id] || []).push(r); });
   const typeList = (types || []).filter(t => pById[t.property_id]);
-  // группируем категории по объекту
   const byProp = {};
   typeList.forEach(t => { (byProp[t.property_id] = byProp[t.property_id] || []).push(t); });
   const propIds = Object.keys(byProp).sort((a, b) => (pById[a].name || '').localeCompare(pById[b].name || '', 'ru'));
 
+  // ── форма тарифа: одна нетто-цена (sell = net) ──
   let formHtml = '';
   if (priceForm) {
     const f = priceForm, isEdit = !!f.id;
     const rt = typeList.find(t => t.id === f.room_type_id);
     const pr = rt && pById[rt.property_id];
+    const price = f.net_price != null ? f.net_price : (f.sell_price != null ? f.sell_price : '');
     formHtml = `<div class="card" style="margin-bottom:14px"><div class="card-head">${isEdit ? 'Изменить тариф' : 'Новый тариф'} · ${esc(pr ? pr.name : '')} — ${esc(rt ? rt.name : '')}</div><div style="padding:14px">
       <div class="row">
-        <div class="field" style="width:130px"><label>Net (контракт)</label><input type="number" min="0" step="0.01" class="input" id="prNet" value="${f.net_price != null ? f.net_price : ''}" placeholder="40"></div>
-        <div class="field" style="width:130px"><label>Sell (для DMC)</label><input type="number" min="0" step="0.01" class="input" id="prSell" value="${f.sell_price != null ? f.sell_price : ''}" placeholder="50"></div>
-        <div class="field" style="width:140px"><label>Retail (опц.)</label><input type="number" min="0" step="0.01" class="input" id="prRetail" value="${f.supplier_retail != null ? f.supplier_retail : ''}" placeholder="—"></div>
-        <div class="field" style="width:130px"><label>SGL-надбавка</label><input type="number" min="0" step="0.01" class="input" id="prSgl" value="${f.sgl_supplement != null ? f.sgl_supplement : 0}"></div>
+        <div class="field" style="width:170px"><label>Цена нетто (видит DMC)</label><input type="number" min="0" step="0.01" class="input" id="prPrice" value="${price}" placeholder="50"></div>
+        <div class="field" style="width:150px"><label>SGL-надбавка</label><input type="number" min="0" step="0.01" class="input" id="prSgl" value="${f.sgl_supplement != null ? f.sgl_supplement : 0}"></div>
+        <div class="field" style="width:150px"><label>Retail (опц.)</label><input type="number" min="0" step="0.01" class="input" id="prRetail" value="${f.supplier_retail != null ? f.supplier_retail : ''}" placeholder="—"></div>
         <div class="field" style="width:90px"><label>Валюта</label><input class="input" id="prCur" value="${esc(f.currency || 'USD')}"></div>
       </div>
       <div class="row" style="margin-top:8px">
@@ -1364,27 +1367,47 @@ async function platformPricing() {
         <button class="btn btn--ghost btn--sm" id="prCancel">Отмена</button>
         <span id="prMsg" class="hint"></span>
       </div>
-      <div class="hint" style="margin-top:8px">DMC увидит только Sell. Спред (Sell − Net) — маржа Waylo, скрыта от DMC. Если задан Retail, требуется Sell &lt; Retail.</div>
+      <div class="hint" style="margin-top:8px">Прозрачно: DMC видит эту цену как есть. Доход Waylo — отдельный сервисный сбор (см. сверху), применяется к счёту. Retail, если задан, должен быть больше цены.</div>
     </div></div>`;
   }
 
   main.innerHTML = `
-    <div class="page-head"><div><h1>Цены</h1><div class="sub">Тарифы на категории номеров. Платформа задаёт net/sell; DMC видит только sell.</div></div></div>
+    <div class="page-head"><div><h1>Цены</h1><div class="sub">Прозрачные нетто-тарифы на категории. DMC видит нетто; доход Waylo — отдельный раскрытый сбор.</div></div></div>
     <div id="prTop"></div>
+    <div class="card" style="margin-bottom:14px"><div class="card-head">Сервисный сбор Waylo</div><div style="padding:14px">
+      ${feeEdit ? `<div class="row" style="align-items:flex-end">
+        <div class="field" style="width:200px"><label>Тип сбора</label><select class="input" id="feeType"><option value="percent" ${fee.fee_type !== 'fixed' ? 'selected' : ''}>% от нетто</option><option value="fixed" ${fee.fee_type === 'fixed' ? 'selected' : ''}>фикс за бронь</option></select></div>
+        <div class="field" style="width:140px"><label>Значение</label><input type="number" min="0" step="0.01" class="input" id="feeVal" value="${Number(fee.fee_value) || 0}"></div>
+        <div class="field" style="width:90px"><label>Валюта</label><input class="input" id="feeCur" value="${esc(fee.currency || 'USD')}"></div>
+        <button class="btn btn--primary btn--sm" id="feeSave">Сохранить</button>
+        <button class="btn btn--ghost btn--sm" id="feeCancel">Отмена</button>
+      </div>` : `<div style="display:flex;align-items:center;gap:12px"><div><b>${esc(feeText)}</b> <span class="hint">— раскрытая строка в счёте (применяется в 0018)</span></div><button class="btn btn--ghost btn--sm" id="feeEditBtn">Изменить</button></div>`}
+    </div></div>
     ${formHtml}
     ${propIds.length ? propIds.map(pid => {
       const p = pById[pid];
       return `<div class="card" style="margin-bottom:12px"><div class="card-head">${esc(p.name)} · <span class="hint">${esc(p.city || '')}</span></div>
-      <table><thead><tr><th>Категория</th><th>Период</th><th style="text-align:right">Net</th><th style="text-align:right">Sell (DMC)</th><th style="text-align:right">Спред</th><th style="text-align:right">SGL</th><th></th></tr></thead><tbody>
+      <table><thead><tr><th>Категория</th><th>Период</th><th style="text-align:right">Цена нетто (= DMC)</th><th style="text-align:right">SGL</th><th></th></tr></thead><tbody>
       ${byProp[pid].map(rt => {
         const rs = ratesByRt[rt.id] || [];
         const addBtn = `<button class="btn btn--ghost btn--sm prAdd" data-rt="${rt.id}">+ тариф</button>`;
-        if (!rs.length) return `<tr><td><b>${esc(rt.name)}</b>${rt.is_active === false ? ' <span class="badge">выкл</span>' : ''}</td><td colspan="5" class="card-empty" style="padding:8px">Цена не задана — DMC не видит эту категорию</td><td style="text-align:right">${addBtn}</td></tr>`;
-        return rs.map((r, i) => `<tr><td>${i === 0 ? `<b>${esc(rt.name)}</b>` : ''}</td><td class="hint">${esc(r.valid_from)} — ${esc(r.valid_to)}</td><td class="price" style="text-align:right">${money(r.net_price, r.currency)}</td><td class="price" style="text-align:right">${money(r.sell_price, r.currency)}</td><td class="price" style="text-align:right"><b>${money(Number(r.sell_price) - Number(r.net_price), r.currency)}</b></td><td class="mono" style="text-align:right">${money(r.sgl_supplement, r.currency)}</td><td style="text-align:right;white-space:nowrap"><button class="btn btn--ghost btn--sm prEdit" data-id="${r.id}">Изменить</button> <button class="btn btn--ghost btn--sm prDel" data-id="${r.id}">✕</button>${i === rs.length - 1 ? ' ' + addBtn : ''}</td></tr>`).join('');
+        if (!rs.length) return `<tr><td><b>${esc(rt.name)}</b>${rt.is_active === false ? ' <span class="badge">выкл</span>' : ''}</td><td colspan="3" class="card-empty" style="padding:8px">Цена не задана — DMC не видит эту категорию</td><td style="text-align:right">${addBtn}</td></tr>`;
+        return rs.map((r, i) => `<tr><td>${i === 0 ? `<b>${esc(rt.name)}</b>` : ''}</td><td class="hint">${esc(r.valid_from)} — ${esc(r.valid_to)}</td><td class="price" style="text-align:right">${money(r.sell_price, r.currency)}</td><td class="mono" style="text-align:right">${money(r.sgl_supplement, r.currency)}</td><td style="text-align:right;white-space:nowrap"><button class="btn btn--ghost btn--sm prEdit" data-id="${r.id}">Изменить</button> <button class="btn btn--ghost btn--sm prDel" data-id="${r.id}">✕</button>${i === rs.length - 1 ? ' ' + addBtn : ''}</td></tr>`).join('');
       }).join('')}
       </tbody></table></div>`;
     }).join('') : `<div class="card"><div class="card-empty">Пока нет категорий. Их создаёт отель/резорт в своём кабинете (вкладка «Категории»).</div></div>`}`;
 
+  // ── сервисный сбор ──
+  const feeBtn = $('#feeEditBtn'); if (feeBtn) feeBtn.onclick = () => { feeEdit = true; platformPricing(); };
+  const feeCancel = $('#feeCancel'); if (feeCancel) feeCancel.onclick = () => { feeEdit = false; platformPricing(); };
+  const feeSave = $('#feeSave'); if (feeSave) feeSave.onclick = async () => {
+    const value = { fee_type: $('#feeType').value, fee_value: parseFloat($('#feeVal').value || '0') || 0, currency: ($('#feeCur').value || 'USD').trim().toUpperCase() };
+    const { error } = await db.from('platform_setting').upsert({ key: 'service_fee', value }, { onConflict: 'key' });
+    if (error) { $('#prTop').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; return; }
+    feeEdit = false; platformPricing();
+  };
+
+  // ── тарифы ──
   const allRates = rates || [];
   const padd = (rtId) => { priceForm = { room_type_id: rtId, sgl_supplement: 0, currency: 'USD', valid_from: '2026-01-01', valid_to: '2026-12-31' }; platformPricing(); };
   document.querySelectorAll('.prAdd').forEach(b => b.onclick = () => padd(b.dataset.rt));
@@ -1396,18 +1419,18 @@ async function platformPricing() {
   });
   const cancel = $('#prCancel'); if (cancel) cancel.onclick = () => { priceForm = null; platformPricing(); };
   const save = $('#prSave'); if (save) save.onclick = async () => {
-    const net = parseFloat($('#prNet').value), sell = parseFloat($('#prSell').value);
+    const price = parseFloat($('#prPrice').value);
     const retailRaw = ($('#prRetail').value || '').trim();
     const retail = retailRaw === '' ? null : parseFloat(retailRaw);
     const sgl = parseFloat($('#prSgl').value || '0') || 0;
     const cur = ($('#prCur').value || 'USD').trim().toUpperCase();
     const from = $('#prFrom').value, to = $('#prTo').value;
     const msg = (t) => { $('#prMsg').innerHTML = `<span style="color:var(--red)">${esc(t)}</span>`; };
-    if (!(net >= 0) || !(sell >= 0)) return msg('Укажите net и sell.');
-    if (net > sell) return msg('Net не может быть больше Sell.');
-    if (retail != null && !(sell < retail)) return msg('Sell должен быть меньше Retail.');
+    if (!(price >= 0)) return msg('Укажите цену нетто.');
+    if (retail != null && !(price < retail)) return msg('Retail должен быть больше цены.');
     if (!from || !to || from > to) return msg('Период задан неверно.');
-    const payload = { net_price: net, sell_price: sell, supplier_retail: retail, sgl_supplement: sgl, currency: cur, valid_from: from, valid_to: to };
+    // прозрачно: net = sell = нетто-цена
+    const payload = { net_price: price, sell_price: price, supplier_retail: retail, sgl_supplement: sgl, currency: cur, valid_from: from, valid_to: to };
     let error;
     if (priceForm.id) ({ error } = await db.from('room_rate').update(payload).eq('id', priceForm.id));
     else { payload.room_type_id = priceForm.room_type_id; ({ error } = await db.from('room_rate').insert(payload)); }
