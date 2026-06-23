@@ -7,12 +7,12 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 const app = document.getElementById('app');
 
-// Стабильность и скорость важнее автосохранения сессии. Отключаем всё, что
-// вешало supabase-js: межвкладочный navigator.locks, фоновое обновление токена
-// и хранение сессии. Старт мгновенный, вход — один быстрый запрос.
+// lock:noLock убирает зависания supabase-js (межвкладочный navigator.locks).
+// С ним сессию можно безопасно хранить — persistSession:true, чтобы НЕ выкидывать
+// из кабинета при обновлении страницы; autoRefreshToken:true продлевает токен.
 const noLock = async (_name, _timeout, fn) => await fn();
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: { lock: noLock, persistSession: false, autoRefreshToken: false },
+  auth: { lock: noLock, persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
 });
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
@@ -33,6 +33,7 @@ const typeBadge = (t) => t === 'HOTEL' ? `<span class="badge badge--accent">от
 
 /* ── state ───────────────────────────────────────────────────────────────── */
 let state = { user:null, contexts:[], isPlatform:false, activeKey:null, tab:null, openReq:null };
+let _firstAuth = false;
 let loginMode = 'signin';
 let pendingOnboard = null;  // {name,type,country} | null — намерение создать компанию при регистрации
 
@@ -47,13 +48,14 @@ async function loadProfile() {
 }
 
 function boot() {
-  // Мгновенный старт: на загрузке НЕ дёргаем getSession (именно он вешал
-  // страницу через navigator.locks). Сразу показываем вход; дальше всем
-  // управляет onAuthStateChange — он отрисует кабинет после успешного входа.
-  render();
+  // Сессию восстановит onAuthStateChange (событие INITIAL_SESSION): есть
+  // сохранённая сессия — откроется кабинет, иначе — вход. Фолбэк-рендер на
+  // случай, если событие не пришло, чтобы не зависнуть на «Загрузка…».
+  setTimeout(() => { if (!_firstAuth) render(); }, 1500);
 }
 let _authUid = null;
 db.auth.onAuthStateChange(async (_e, session) => {
+  _firstAuth = true;
   const user = session?.user || null;
   if (!user) {                                  // выход
     _authUid = null; pendingOnboard = null;
