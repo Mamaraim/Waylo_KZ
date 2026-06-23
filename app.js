@@ -71,10 +71,14 @@ db.auth.onAuthStateChange(async (_e, session) => {
   try { await db.rpc('accept_pending_invites'); } catch (_e) {}
   await loadProfile();
   // нет организации, но есть намерение зарегистрировать компанию → создаём её
-  if (!state.contexts.length && pendingOnboard) {
-    try { await db.rpc('onboard_organization', { p_name: pendingOnboard.name, p_type: pendingOnboard.type, p_country: pendingOnboard.country }); } catch (_e) {}
-    pendingOnboard = null;
-    await loadProfile();
+  if (!state.contexts.length) {
+    let intent = pendingOnboard;
+    if (!intent) { try { intent = JSON.parse(localStorage.getItem('waylo_onboard') || 'null'); } catch (_e) { intent = null; } }
+    if (intent && intent.name) {
+      try { await db.rpc('onboard_organization', { p_name: intent.name, p_type: intent.type, p_country: intent.country, p_city: intent.city }); } catch (_e) {}
+      pendingOnboard = null; try { localStorage.removeItem('waylo_onboard'); } catch (_e) {}
+      await loadProfile();
+    }
   }
   render();
 });
@@ -102,6 +106,7 @@ function renderLogin() {
       <div class="field"><label>Пароль</label><input type="password" id="password" autocomplete="current-password" required></div>
       <div id="loginErr"></div>
       <button class="btn btn--primary" id="loginBtn">Войти</button>
+      <button type="button" class="btn btn--ghost" id="googleBtn" style="width:100%;justify-content:center;display:flex;margin-top:8px">Войти через Google</button>
       <div class="login-creds">Тест (пароль <code>waylo-test-pass</code>): <code id="segCred">${esc(seg.email)}</code></div>
       <div class="op-link">Оператор Waylo — <a id="opLink">platform@waylo.test</a></div>
       <div class="op-link" style="margin-top:6px">Впервые здесь? <a id="toSignup">Регистрация компании →</a></div>
@@ -115,6 +120,7 @@ function renderLogin() {
   $('#segSel').onchange = () => pick(SEGMENTS.find(x => x.key === $('#segSel').value));
   $('#opLink').onclick = () => { $('#email').value = 'platform@waylo.test'; $('#segCred').textContent = 'platform@waylo.test'; };
   $('#toSignup').onclick = () => { loginMode = 'signup'; renderLogin(); };
+  const gb = $('#googleBtn'); if (gb) gb.onclick = () => googleSignIn(null);
   $('#loginForm').onsubmit = async (e) => {
     e.preventDefault();
     const btn = $('#loginBtn'); btn.disabled = true; btn.textContent = 'Входим…';
@@ -137,26 +143,34 @@ function renderSignup() {
       <div class="seg-sub">Выберите, кто вы — создадим кабинет нужного типа, вы станете суперадмином. Если вас пригласили в существующую компанию, доступ выдастся по приглашению автоматически (тип и название можно не трогать).</div>
       <div class="field"><label>Тип компании</label>
         <select class="input" id="suType">
-          <option value="DMC">DMC / турагентство (клиент)</option>
-          <option value="HOTEL">Отель / резорт (поставщик)</option>
-          <option value="TRANSPORT">Транспортная компания (поставщик)</option>
+          <option value="DMC">DMC / турагентство</option>
+          <option value="HOTEL">Отель / резорт</option>
+          <option value="TRANSPORT">Транспортная компания</option>
         </select>
       </div>
       <div class="field"><label>Название компании</label><input class="input" id="suName" placeholder="Например: Silk Road DMC"></div>
       <div class="field"><label>Страна</label><input class="input" id="suCountry" placeholder="KZ / UZ"></div>
+      <div class="field"><label>Город</label><input class="input" id="suCity" placeholder="Например: Ташкент"></div>
       <div class="field"><label>Почта</label><input type="email" id="suEmail" autocomplete="username" placeholder="you@company.com" required></div>
       <div class="field"><label>Пароль</label><input type="password" id="suPass" autocomplete="new-password" placeholder="не менее 6 символов" required></div>
       <div class="field"><label>Повтор пароля</label><input type="password" id="suPass2" autocomplete="new-password" required></div>
       <div id="suErr"></div>
       <button class="btn btn--primary" id="suBtn">Зарегистрироваться</button>
+      <button type="button" class="btn btn--ghost" id="suGoogleBtn" style="width:100%;justify-content:center;display:flex;margin-top:8px">Зарегистрировать через Google</button>
       <div class="op-link" style="margin-top:8px"><a id="toSignin">← Уже есть аккаунт? Войти</a></div>
     </form></div>`;
   $('#toSignin').onclick = () => { loginMode = 'signin'; renderLogin(); };
+  const sug = $('#suGoogleBtn'); if (sug) sug.onclick = () => {
+    const nm = ($('#suName').value || '').trim();
+    if (!nm) { $('#suErr').innerHTML = `<div class="notice notice--err">Для регистрации через Google укажите название компании.</div>`; return; }
+    googleSignIn({ name: nm, type: $('#suType').value, country: ($('#suCountry').value||'').trim()||null, city: ($('#suCity').value||'').trim()||null });
+  };
   $('#suForm').onsubmit = async (e) => {
     e.preventDefault();
     const type = $('#suType').value;
     const name = ($('#suName').value || '').trim();
     const country = ($('#suCountry').value || '').trim() || null;
+    const city = ($('#suCity').value || '').trim() || null;
     const email = ($('#suEmail').value || '').trim().toLowerCase();
     const p1 = $('#suPass').value, p2 = $('#suPass2').value;
     if (!name) { $('#suErr').innerHTML = `<div class="notice notice--err">Укажите название компании (или, если вас пригласили, попросите суперадмина пригласить именно этот email).</div>`; return; }
@@ -164,9 +178,11 @@ function renderSignup() {
     if (p1 !== p2) { $('#suErr').innerHTML = `<div class="notice notice--err">Пароли не совпадают.</div>`; return; }
     const btn = $('#suBtn'); btn.disabled = true; btn.textContent = 'Регистрируем…';
     // намерение создать компанию: применится после входа, только если приглашения нет
-    pendingOnboard = { name, type, country };
+    const intent = { name, type, country, city };
+    pendingOnboard = intent;
+    try { localStorage.setItem('waylo_onboard', JSON.stringify(intent)); } catch (_e) {}
     const { data, error } = await db.auth.signUp({ email, password: p1 });
-    if (error) { pendingOnboard = null; $('#suErr').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; btn.disabled = false; btn.textContent = 'Зарегистрироваться'; return; }
+    if (error) { pendingOnboard = null; try { localStorage.removeItem('waylo_onboard'); } catch (_e) {} $('#suErr').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; btn.disabled = false; btn.textContent = 'Зарегистрироваться'; return; }
     if (data && data.session) {
       const { error: e2 } = await db.auth.signInWithPassword({ email, password: p1 });
       if (e2) { pendingOnboard = null; $('#suErr').innerHTML = `<div class="notice notice--err">${esc(e2.message)}</div>`; btn.disabled = false; btn.textContent = 'Зарегистрироваться'; }
@@ -177,6 +193,13 @@ function renderSignup() {
       loginMode = 'signin';
     }
   };
+}
+
+async function googleSignIn(intent) {
+  try { if (intent && intent.name) localStorage.setItem('waylo_onboard', JSON.stringify(intent)); else localStorage.removeItem('waylo_onboard'); } catch (_e) {}
+  const redirectTo = location.href.split('#')[0].split('?')[0];
+  const { error } = await db.auth.signInWithOAuth({ provider: 'google', options: { redirectTo } });
+  if (error) alert('Google: ' + error.message);
 }
 
 /* ── shell ───────────────────────────────────────────────────────────────── */
