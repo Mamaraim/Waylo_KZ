@@ -340,8 +340,8 @@ async function dmcDashboard(active) {
 async function dmcCatalog() {
   const main = $('#main'); if (!main) return;
   const [{ data: props }, { data: types }, { data: rates, error }, { data: vcs }, { data: trates }] = await Promise.all([
-    db.from('property').select('id,name,city,kind,star_category').eq('is_active', true),
-    db.from('room_type').select('id,property_id,name'),
+    db.from('property').select('id,name,city,kind,star_category,photo_url').eq('is_active', true),
+    db.from('room_type').select('id,property_id,name,photo_url'),
     db.from('room_rate_public').select('room_type_id,sell_price,currency'),
     db.from('vehicle_class').select('id,name,pax_min,pax_max'),
     db.from('transport_rate_public').select('vehicle_class_id,basis,sell_price_per_unit,currency'),
@@ -351,8 +351,8 @@ async function dmcCatalog() {
   const rateByRt = {}; (rates || []).forEach(r => { if (!rateByRt[r.room_type_id]) rateByRt[r.room_type_id] = r; });
   // группируем тарифы по объекту: мин. цена + число категорий
   const byProp = {};
-  (rates || []).forEach(r => { const t = tById[r.room_type_id]; if (!t) return; const pid = t.property_id; const e = byProp[pid] || { min: Infinity, cats: 0, cur: r.currency }; e.min = Math.min(e.min, Number(r.sell_price) || 0); e.cats += 1; byProp[pid] = e; });
-  const cards = (props || []).filter(p => byProp[p.id]).map(p => ({ ...p, min: byProp[p.id].min, cats: byProp[p.id].cats, cur: byProp[p.id].cur }))
+  (rates || []).forEach(r => { const t = tById[r.room_type_id]; if (!t) return; const pid = t.property_id; const e = byProp[pid] || { min: Infinity, cats: 0, cur: r.currency, photo: null }; e.min = Math.min(e.min, Number(r.sell_price) || 0); e.cats += 1; if (!e.photo && t.photo_url) e.photo = t.photo_url; byProp[pid] = e; });
+  const cards = (props || []).filter(p => byProp[p.id]).map(p => ({ ...p, min: byProp[p.id].min, cats: byProp[p.id].cats, cur: byProp[p.id].cur, photo: byProp[p.id].photo }))
     .sort((a, b) => (a.city || '').localeCompare(b.city || '', 'ru'));
   const vById = Object.fromEntries((vcs || []).map(v => [v.id, v]));
   const trows = (trates || []).map(r => { const v = vById[r.vehicle_class_id]; return v ? { ...r, vname: v.name, pax: `${v.pax_min}–${v.pax_max}` } : null; }).filter(Boolean);
@@ -364,9 +364,10 @@ async function dmcCatalog() {
     <div id="catGrid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px">
       ${cards.length ? cards.map(c => `
         <div class="card catCard" data-q="${esc((c.name + ' ' + c.city).toLowerCase())}">
-          <div style="height:110px;background:repeating-linear-gradient(135deg,var(--line-2) 0 12px,var(--line) 12px 24px);position:relative;display:flex;align-items:flex-end;padding:12px">
-            <span style="background:rgba(255,255,255,.92);border-radius:7px;padding:4px 9px;font-size:11px;font-weight:600;color:${c.kind === 'resort' ? 'var(--accent-ink)' : 'var(--ink-2)'}">${esc(KIND[c.kind] || 'Объект')}</span>
-            ${c.star_category ? `<span style="position:absolute;top:12px;right:12px;font-size:12px;color:var(--amber);font-weight:600">${'★'.repeat(c.star_category)}</span>` : ''}
+          <div style="height:110px;position:relative;display:flex;align-items:flex-end;padding:12px;overflow:hidden;background:repeating-linear-gradient(135deg,var(--line-2) 0 12px,var(--line) 12px 24px)">
+            ${(c.photo_url || c.photo) ? `<img src="${esc(c.photo_url || c.photo)}" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover" onerror="this.remove()">` : ''}
+            <span style="position:relative;z-index:1;background:rgba(255,255,255,.92);border-radius:7px;padding:4px 9px;font-size:11px;font-weight:600;color:${c.kind === 'resort' ? 'var(--accent-ink)' : 'var(--ink-2)'}">${esc(KIND[c.kind] || 'Объект')}</span>
+            ${c.star_category ? `<span style="position:absolute;top:12px;right:12px;z-index:1;font-size:12px;color:var(--amber);font-weight:600;background:rgba(255,255,255,.85);border-radius:6px;padding:1px 6px">${'★'.repeat(c.star_category)}</span>` : ''}
           </div>
           <div style="padding:15px 17px">
             <div style="font-weight:600;font-size:15px">${esc(c.name)}</div>
@@ -544,7 +545,7 @@ function renderAddLine(reqId, onAdded) {
   $('#addHotelBtn').onclick = async () => {
     const [{ data: props }, { data: types }, { data: rates }] = await Promise.all([
       db.from('property').select('id,name,org_id').eq('is_active', true),
-      db.from('room_type').select('id,property_id,name'),
+      db.from('room_type').select('id,property_id,name,photo_url'),
       db.from('room_rate_public').select('room_type_id,sell_price,currency'),
     ]);
     const pById = Object.fromEntries((props || []).map(p => [p.id, p]));
@@ -1054,7 +1055,7 @@ async function hotelCats(active) {
   const propList = props || [];
   const pById = Object.fromEntries(propList.map(p => [p.id, p]));
   const ids = propList.map(p => p.id);
-  const { data: cats } = ids.length ? await db.from('room_type').select('id,property_id,name,short_name,max_occupancy,default_availability,is_active').in('property_id', ids).order('name') : { data: [] };
+  const { data: cats } = ids.length ? await db.from('room_type').select('id,property_id,name,short_name,max_occupancy,default_availability,is_active,photo_url').in('property_id', ids).order('name') : { data: [] };
   const list = cats || [];
   const KINDS = { city:'Городской отель', resort:'Резорт' };
 
@@ -1069,6 +1070,7 @@ async function hotelCats(active) {
         <div class="field" style="width:170px"><label>Тип</label><select class="input" id="pfKind"><option value="city" ${p.kind !== 'resort' ? 'selected' : ''}>Городской отель</option><option value="resort" ${p.kind === 'resort' ? 'selected' : ''}>Резорт</option></select></div>
         <div class="field" style="width:90px"><label>Звёзды</label><input type="number" min="1" max="5" class="input" id="pfStar" value="${p.star_category || 4}"></div>
         <div class="field" style="width:90px"><label>Активен</label><select class="input" id="pfAct"><option value="1" ${p.is_active !== false ? 'selected' : ''}>Да</option><option value="0" ${p.is_active === false ? 'selected' : ''}>Нет</option></select></div>
+        <div class="field" style="flex:1;min-width:240px"><label>Фото (URL картинки)</label><input class="input" id="pfPhoto" value="${esc(p.photo_url || '')}" placeholder="https://…/hotel.jpg"></div>
       </div>
       <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
         <button class="btn btn--primary btn--sm" id="pfSave">${isEdit ? 'Сохранить' : 'Создать объект'}</button>
@@ -1090,6 +1092,7 @@ async function hotelCats(active) {
         <div class="field" style="width:120px"><label>Основных мест</label><input type="number" min="1" class="input" id="cfOcc" value="${c.max_occupancy || 2}"></div>
         <div class="field" style="width:140px"><label>Дефолт-доступность</label><input type="number" min="0" class="input" id="cfDef" value="${c.default_availability || 0}"></div>
         <div class="field" style="width:90px"><label>Активна</label><select class="input" id="cfAct"><option value="1" ${c.is_active !== false ? 'selected' : ''}>Да</option><option value="0" ${c.is_active === false ? 'selected' : ''}>Нет</option></select></div>
+        <div class="field" style="flex:1;min-width:240px"><label>Фото (URL картинки)</label><input class="input" id="cfPhoto" value="${esc(c.photo_url || '')}" placeholder="https://…/room.jpg"></div>
       </div>
       <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
         <button class="btn btn--primary btn--sm" id="cfSave">${isEdit ? 'Сохранить' : 'Создать'}</button>
@@ -1125,7 +1128,7 @@ async function hotelCats(active) {
       ${list.map(c => `<tr>
         <td>${c.is_active ? '<span class="badge badge--accent">вкл</span>' : '<span class="badge">выкл</span>'}</td>
         <td class="hint">${esc(pById[c.property_id] && pById[c.property_id].name || '—')}</td>
-        <td><b>${esc(c.name)}</b></td>
+        <td><div style="display:flex;align-items:center;gap:8px">${c.photo_url ? `<img src="${esc(c.photo_url)}" style="width:36px;height:27px;object-fit:cover;border-radius:5px" onerror="this.remove()">` : ''}<b>${esc(c.name)}</b></div></td>
         <td class="hint">${esc(c.short_name || '—')}</td>
         <td class="mono" style="text-align:center">${c.max_occupancy}</td>
         <td class="mono" style="text-align:center">${c.default_availability || 0}</td>
@@ -1146,6 +1149,7 @@ async function hotelCats(active) {
       kind: $('#pfKind').value,
       star_category: Math.min(5, Math.max(1, parseInt($('#pfStar').value || '4', 10))),
       is_active: $('#pfAct').value === '1',
+      photo_url: ($('#pfPhoto').value || '').trim() || null,
     };
     let error;
     if (propForm.id) ({ error } = await db.from('property').update(payload).eq('id', propForm.id));
@@ -1173,6 +1177,7 @@ async function hotelCats(active) {
       max_occupancy: Math.max(1, parseInt($('#cfOcc').value || '2', 10)),
       default_availability: Math.max(0, parseInt($('#cfDef').value || '0', 10)),
       is_active: $('#cfAct').value === '1',
+      photo_url: ($('#cfPhoto').value || '').trim() || null,
     };
     let error;
     if (catForm.id) ({ error } = await db.from('room_type').update(payload).eq('id', catForm.id));
@@ -1923,7 +1928,7 @@ let calcTour = null;  // {id,name,pax,currency}
 async function loadCalcCat() {
   const [{ data: props }, { data: types }, { data: rates }, { data: vcs }, { data: trates }] = await Promise.all([
     db.from('property').select('id,name,city,kind,org_id').eq('is_active', true),
-    db.from('room_type').select('id,property_id,name'),
+    db.from('room_type').select('id,property_id,name,photo_url'),
     db.from('room_rate_public').select('room_type_id,sell_price,sgl_supplement'),
     db.from('vehicle_class').select('id,name,org_id'),
     db.from('transport_rate_public').select('vehicle_class_id,sell_price_per_unit'),
