@@ -1332,7 +1332,7 @@ const FLEET_TIERS = [
 
 async function transportFleet(active) {
   const main = $('#main'); if (!main) return;
-  const { data: vcs } = await db.from('vehicle_class').select('id,name,pax_min,pax_max').eq('org_id', active.orgId).order('pax_min');
+  const { data: vcs } = await db.from('vehicle_class').select('id,name,pax_min,pax_max,cities').eq('org_id', active.orgId).order('pax_min');
   const ids = (vcs || []).map(v => v.id);
   const { data: rates } = ids.length
     ? await db.from('transport_rate').select('vehicle_class_id,net_price_per_unit,sell_price_per_unit,currency').in('vehicle_class_id', ids)
@@ -1346,21 +1346,23 @@ async function transportFleet(active) {
           ${FLEET_TIERS.map((t,i) => `<option value="${i}">${esc(t.name)} · ${t.pax_min}–${t.pax_max} pax</option>`).join('')}
         </select></div>
         <div class="field" style="width:170px"><label>Ваша цена, $ (за трансфер)</label><input type="number" min="0" step="1" id="flNet" placeholder="напр. 40"></div>
+        <div class="field" style="flex:1;min-width:220px"><label>Города (через запятую)</label><input class="input" id="flCities" placeholder="Ташкент, Чарвак, Акташ"></div>
         <button class="btn btn--primary btn--sm" id="flSave">Добавить</button>
       </div>
       <div class="hint" id="flCalc" style="margin-top:8px"></div>
       <div id="flMsg"></div>
     </div></div>
     <div class="card"><div class="card-head">Мой автопарк</div>
-    ${(vcs||[]).length ? `<table><thead><tr><th>Класс</th><th>Pax</th><th style="text-align:right">Ваша цена (net)</th><th style="text-align:right">Цена DMC (sell)</th><th style="text-align:right">Комиссия Waylo</th><th></th></tr></thead><tbody>
-      ${vcs.map(v => { const r = rByVc[v.id]; const net = r?.net_price_per_unit ?? null, sell = r?.sell_price_per_unit ?? null; const com = (net!=null && sell!=null) ? (sell - net) : null; return `<tr><td>${esc(v.name)}</td><td class="mono">${v.pax_min}–${v.pax_max}</td><td class="price" style="text-align:right">${money(net,r?.currency)}</td><td class="price" style="text-align:right">${money(sell,r?.currency)}</td><td class="mono" style="text-align:right">${money(com,r?.currency)}</td><td style="text-align:right"><button class="btn btn--ghost btn--sm flDel" data-id="${v.id}">Удалить</button></td></tr>`; }).join('')}
+    ${(vcs||[]).length ? `<table><thead><tr><th>Класс</th><th>Pax</th><th style="text-align:right">Ваша цена (net)</th><th style="text-align:right">Цена DMC (sell)</th><th style="text-align:right">Комиссия Waylo</th><th>Города</th><th></th></tr></thead><tbody>
+      ${vcs.map(v => { const r = rByVc[v.id]; const net = r?.net_price_per_unit ?? null, sell = r?.sell_price_per_unit ?? null; const com = (net!=null && sell!=null) ? (sell - net) : null; return `<tr><td>${esc(v.name)}</td><td class="mono">${v.pax_min}–${v.pax_max}</td><td class="price" style="text-align:right">${money(net,r?.currency)}</td><td class="price" style="text-align:right">${money(sell,r?.currency)}</td><td class="mono" style="text-align:right">${money(com,r?.currency)}</td><td><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">${(v.cities&&v.cities.length)?v.cities.map(c=>`<span class="badge badge--gray">${esc(c)}</span>`).join(''):'<span class="hint">все города</span>'} <button class="btn btn--ghost btn--sm flCit" data-id="${v.id}">Изменить</button></div></td><td style="text-align:right"><button class="btn btn--ghost btn--sm flDel" data-id="${v.id}">Удалить</button></td></tr>`; }).join('')}
     </tbody></table>` : `<div class="card-empty">Автопарк пуст — добавьте класс выше.</div>`}</div>`;
   const calc = () => { const net = Number($('#flNet').value || 0); $('#flCalc').textContent = net > 0 ? `DMC увидит ${money(Math.round(net*1.1))}, комиссия Waylo ${money(Math.round(net*1.1)-net)} (10%).` : ''; };
   $('#flNet').oninput = calc;
   $('#flSave').onclick = async () => {
     const t = FLEET_TIERS[Number($('#flTier').value)]; const net = Number($('#flNet').value || 0);
     if (!t || net <= 0) { $('#flMsg').innerHTML = `<div class="notice notice--err">Укажите класс и цену.</div>`; return; }
-    const { data: vc, error: e1 } = await db.from('vehicle_class').insert({ org_id:active.orgId, name:t.name, pax_min:t.pax_min, pax_max:t.pax_max }).select().single();
+    const flCities = ($('#flCities').value || '').split(/[,;\n]/).map(x => x.trim()).filter(Boolean);
+    const { data: vc, error: e1 } = await db.from('vehicle_class').insert({ org_id:active.orgId, name:t.name, pax_min:t.pax_min, pax_max:t.pax_max, cities: flCities.length ? flCities : null }).select().single();
     if (e1) { $('#flMsg').innerHTML = `<div class="notice notice--err">${esc(e1.message)}</div>`; return; }
     const { error: e2 } = await db.from('transport_rate').insert({ vehicle_class_id:vc.id, basis:'per_transfer', valid_from:'2026-01-01', valid_to:'2030-12-31', net_price_per_unit:net, sell_price_per_unit:Math.round(net*1.1*100)/100, currency:'USD' });
     if (e2) { $('#flMsg').innerHTML = `<div class="notice notice--err">${esc(e2.message)}</div>`; return; }
@@ -1369,6 +1371,16 @@ async function transportFleet(active) {
   document.querySelectorAll('.flDel').forEach(b => b.onclick = async () => {
     const { error } = await db.from('vehicle_class').delete().eq('id', b.dataset.id);
     if (error) $('#flMsg') && ($('#flMsg').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`);
+    else transportFleet(active);
+  });
+  document.querySelectorAll('.flCit').forEach(b => b.onclick = async () => {
+    const v = (vcs || []).find(x => x.id === b.dataset.id);
+    const cur = (v && v.cities && v.cities.length) ? v.cities.join(', ') : '';
+    const raw = prompt('Города обслуживания через запятую (пусто = все города):', cur);
+    if (raw === null) return;
+    const cities = raw.split(/[,;\n]/).map(x => x.trim()).filter(Boolean);
+    const { error } = await db.from('vehicle_class').update({ cities: cities.length ? cities : null }).eq('id', b.dataset.id);
+    if (error) { $('#flMsg') && ($('#flMsg').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`); }
     else transportFleet(active);
   });
 }
@@ -1383,7 +1395,7 @@ async function transportAvail(active) {
   const fromD = shaFromT, toD = addDays(shaFromT, N);
   const days = []; for (let i = 0; i < N; i++) days.push(addDays(shaFromT, i));
 
-  const { data: vcs } = await db.from('vehicle_class').select('id,name,pax_min,pax_max').eq('org_id', active.orgId).order('pax_min');
+  const { data: vcs } = await db.from('vehicle_class').select('id,name,pax_min,pax_max,cities').eq('org_id', active.orgId).order('pax_min');
   const classes = (vcs || []).map(v => ({ id: v.id, label: `${v.name} (${v.pax_min}–${v.pax_max} pax)` }));
   const ids = classes.map(c => c.id);
 
@@ -1930,7 +1942,7 @@ async function loadCalcCat() {
     db.from('property').select('id,name,city,kind,org_id').eq('is_active', true),
     db.from('room_type').select('id,property_id,name,photo_url'),
     db.from('room_rate_public').select('room_type_id,sell_price,sgl_supplement'),
-    db.from('vehicle_class').select('id,name,org_id'),
+    db.from('vehicle_class').select('id,name,org_id,cities'),
     db.from('transport_rate_public').select('vehicle_class_id,sell_price_per_unit'),
   ]);
   const pById = {}; (props || []).forEach(p => pById[p.id] = p);
@@ -1941,7 +1953,7 @@ async function loadCalcCat() {
   });
   const cities = [...new Set(acc.map(a => a.city))].sort((a, b) => a.localeCompare(b, 'ru'));
   const tByVc = {}; (trates || []).forEach(r => { if (!tByVc[r.vehicle_class_id]) tByVc[r.vehicle_class_id] = r; });
-  const veh = (vcs || []).filter(v => tByVc[v.id]).map(v => ({ id: v.id, name: v.name, day: Number(tByVc[v.id].sell_price_per_unit) || 0, supplier: v.org_id })).sort((a, b) => a.day - b.day);
+  const veh = (vcs || []).filter(v => tByVc[v.id]).map(v => ({ id: v.id, name: v.name, day: Number(tByVc[v.id].sell_price_per_unit) || 0, supplier: v.org_id, cities: v.cities || [] })).sort((a, b) => a.day - b.day);
   return { acc, cities, veh };
 }
 
@@ -1970,9 +1982,16 @@ function accOptionsForCity(city, selId) {
   });
   return h;
 }
-function vehOptions(selId) {
+function vehOptions(selId, city) {
   let h = '<option value="">— класс —</option>';
-  calcCat.veh.forEach(v => { h += `<option value="${v.id}"${v.id === selId ? ' selected' : ''}>${esc(v.name)} — $${v.day}/дн</option>`; });
+  const norm = (x) => String(x || '').trim().toLowerCase();
+  const c = norm(city);
+  calcCat.veh.forEach(v => {
+    const cities = v.cities || [];
+    const serves = !c || !cities.length || cities.some(x => norm(x) === c);
+    if (!serves && v.id !== selId) return;
+    h += `<option value="${v.id}"${v.id === selId ? ' selected' : ''}>${esc(v.name)} — $${v.day}/дн</option>`;
+  });
   return h;
 }
 function suppOf(st) { return Math.round(((st.sgl || 0) - (st.twin || 0) / 2) * (st.nights || 0)); }
@@ -2039,7 +2058,7 @@ function renderCalc(active) {
   const transRows = s.trans.length ? s.trans.map((t, i) => `<div class="cgr gtr">
     <input class="cauto" value="${esc(t.city)}" readonly>
     <input class="cauto" value="${t.days}" readonly>
-    <select class="cTveh" data-i="${i}">${vehOptions(t.vehId)}</select>
+    <select class="cTveh" data-i="${i}">${vehOptions(t.vehId, t.city)}</select>
     <input type="number" min="0" class="cTpr" data-i="${i}" value="${t.price || 0}">
     <div class="hint cright">${t.price && t.days ? '$' + (t.price * t.days).toLocaleString('ru') : '—'}</div>
   </div>`).join('') : `<div class="csub">Появится автоматически после добавления локаций.</div>`;
