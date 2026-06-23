@@ -183,18 +183,23 @@ function renderSignup() {
 function renderShell() {
   const active = state.contexts.find(c => c.key === state.activeKey);
   const roleLabel = { superadmin:'суперадмин', admin:'админ', operator:'оператор' };
+  const tag = active && active.orgName ? active.orgName.replace(/[^A-Za-zА-Яа-я0-9]/g, '').slice(0, 2).toUpperCase() : 'W';
   app.innerHTML = `
-    <div class="topbar">
-      <div class="brand">Waylo<span class="chev">›</span><span class="kz">KZ</span></div>
-      <div class="spacer"></div>
-      ${state.contexts.length ? `<div class="switcher">
-        <select id="orgSel">${state.contexts.map(c => `<option value="${c.key}" ${c.key===state.activeKey?'selected':''}>${esc(c.orgName)}${c.kind==='org'?` · ${c.orgType}`:''}</option>`).join('')}</select>
-        ${active ? `<span class="role-chip">${roleLabel[active.role]||active.role}</span>` : ''}
-      </div>` : ''}
-      <span class="user-email">${esc(state.user?.email || '')}</span>
-      <button class="linkbtn" id="logout">Выйти</button>
-    </div>
-    <div id="content"></div>`;
+    <div class="appwrap">
+      <aside class="sidebar">
+        <div class="side-brand">waylo<span>/ kz</span></div>
+        <div class="side-cab">
+          ${state.contexts.length > 1 ? `<select id="orgSel" class="input">${state.contexts.map(c => `<option value="${c.key}" ${c.key===state.activeKey?'selected':''}>${esc(c.orgName)}${c.kind==='org'?` · ${c.orgType}`:''}</option>`).join('')}</select>` : ''}
+          ${active ? `<div class="org-chip"><div class="org-tag">${esc(tag)}</div><div class="org-meta"><div class="org-name">${esc(active.orgName||'')}</div><div class="org-role">${esc(roleLabel[active.role]||active.role||'')}</div></div></div>` : ''}
+        </div>
+        <nav class="side-nav" id="navlist"></nav>
+        <button class="side-logout" id="logout"><span class="dot"></span>Выйти из кабинета</button>
+      </aside>
+      <main class="appmain">
+        <header class="apphead" id="apphead"></header>
+        <div class="appcontent" id="content"><div id="main"><div class="center-state">Загрузка…</div></div></div>
+      </main>
+    </div>`;
   const sel = $('#orgSel');
   if (sel) sel.onchange = () => { state.activeKey = sel.value; state.tab = null; state.openReq = null; renderShell(); };
   $('#logout').onclick = () => db.auth.signOut();
@@ -212,14 +217,15 @@ function renderCabinet() {
 }
 
 function navShell(kicker, tabs) {
-  $('#content').innerHTML = `
-    <div class="shell">
-      <nav class="nav"><div class="kicker">${esc(kicker)}</div>
-        ${tabs.map(t => `<button data-tab="${t.id}" class="${state.tab===t.id?'active':''}">${esc(t.label)}</button>`).join('')}
-      </nav>
-      <main class="main" id="main"><div class="center-state">Загрузка…</div></main>
-    </div>`;
-  document.querySelectorAll('.nav button[data-tab]').forEach(b => b.onclick = () => { state.tab = b.dataset.tab; state.openReq = null; renderCabinet(); });
+  const nav = document.getElementById('navlist');
+  if (nav) {
+    nav.innerHTML = tabs.map(t => `<button data-tab="${t.id}" class="${state.tab===t.id?'active':''}"><span class="ndot"></span>${esc(t.label)}</button>`).join('');
+    nav.querySelectorAll('button[data-tab]').forEach(b => b.onclick = () => { state.tab = b.dataset.tab; state.openReq = null; renderCabinet(); });
+  }
+  const head = document.getElementById('apphead');
+  if (head) head.innerHTML = `<div><div class="ah-title">${esc(kicker)}</div></div><div class="ah-right"><span class="user-email">${esc(state.user?.email || '')}</span></div>`;
+  const main = document.getElementById('main');
+  if (main) main.innerHTML = `<div class="center-state">Загрузка…</div>`;
 }
 
 /* ── DMC ─────────────────────────────────────────────────────────────────── */
@@ -1481,12 +1487,13 @@ async function dmcPayments(active) {
   ]);
   const ids = (reqs || []).map(r => r.id);
   const [{ data: lines }, { data: events }] = await Promise.all([
-    ids.length ? db.from('request_line').select('request_id,sell_price,quantity,from_date,to_date').in('request_id', ids) : Promise.resolve({ data: [] }),
+    ids.length ? db.from('request_line').select('request_id,sell_price,quantity,from_date,to_date,confirmation').in('request_id', ids) : Promise.resolve({ data: [] }),
     ids.length ? db.from('payment_event').select('request_id,amount,status').in('request_id', ids) : Promise.resolve({ data: [] }),
   ]);
   const fee = (setting && setting[0] && setting[0].value) || { fee_type: 'percent', fee_value: 0 };
   const linesBy = {}; (lines || []).forEach(l => { (linesBy[l.request_id] = linesBy[l.request_id] || []).push(l); });
   const paidBy = {}; (events || []).forEach(e => { if (e.status === 'paid') paidBy[e.request_id] = (paidBy[e.request_id] || 0) + Number(e.amount || 0); });
+  const confBy = {}; (lines || []).forEach(l => { if (l.confirmation === 'confirmed') confBy[l.request_id] = true; });
   const lt = (id) => (linesBy[id] || []).reduce((s, l) => s + Number(l.sell_price || 0) * l.quantity * _nights(l), 0);
   const total = (id) => { const x = lt(id); return x + _feeOf(fee, x); };
 
@@ -1504,7 +1511,7 @@ async function dmcPayments(active) {
           <td class="price" style="text-align:right"><b>${money(t, r.currency)}</b></td>
           <td class="mono">${r.payment_code ? esc(r.payment_code) : '<span class="hint">—</span>'}${r.due_date ? `<div class="hint">до ${esc(r.due_date)}</div>` : ''}</td>
           <td>${isPaid ? '<span class="badge badge--green">оплачено</span>' : r.payment_code ? '<span class="badge badge--amber">ожидает оплаты</span>' : '<span class="badge badge--gray">счёт не выставлен</span>'}</td>
-          <td style="text-align:right">${!r.payment_code && t > 0 ? `<button class="btn btn--primary btn--sm issInv" data-req="${r.id}">Выставить счёт</button>` : ''}</td>
+          <td style="text-align:right">${!r.payment_code && t > 0 ? `<button class="btn btn--primary btn--sm issInv" data-req="${r.id}">Выставить счёт</button>` : ''}${isPaid && confBy[r.id] ? ` <button class="btn btn--ghost btn--sm vouBtn" data-req="${r.id}">Ваучер</button>` : ''}</td>
         </tr>`; }).join('')}
     </tbody></table>` : `<div class="card-empty">Туров пока нет. Создайте тур во вкладке «Туры» и забронируйте.</div>`}</div>`;
 
@@ -1514,6 +1521,7 @@ async function dmcPayments(active) {
     if (error) { $('#payMsg').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; b.disabled = false; b.textContent = 'Выставить счёт'; }
     else dmcPayments(active);
   });
+  document.querySelectorAll('.vouBtn').forEach(b => b.onclick = () => dmcVoucher(active, b.dataset.req));
 }
 
 async function platformPayments() {
@@ -1564,13 +1572,122 @@ async function platformPayments() {
   });
 }
 
+/* ── Ваучер (печатный документ из подтверждённой брони, 0020) ────────────────*/
+function ensureVoucherStyle() {
+  if (document.getElementById('vou-style')) return;
+  const st = document.createElement('style'); st.id = 'vou-style';
+  st.textContent = '@media print{.topbar,.nav,.no-print{display:none!important}.shell{display:block!important}#content,#main{padding:0!important;margin:0!important}.voucher-card{box-shadow:none!important;border:1px solid #999!important;page-break-inside:avoid}}';
+  document.head.appendChild(st);
+}
+
+async function dmcVoucher(active, reqId) {
+  const main = $('#main'); if (!main) return;
+  ensureVoucherStyle();
+  const { error: vErr } = await db.rpc('issue_vouchers', { p_request: reqId });   // идемпотентно
+  if (vErr) { main.innerHTML = `<div class="notice notice--err">${esc(vErr.message)}</div><div style="margin-top:10px"><button class="btn btn--ghost" id="vouBack">← Назад</button></div>`; const bb = $('#vouBack'); if (bb) bb.onclick = () => dmcPayments(active); return; }
+  const [{ data: req }, { data: vouchers }, { data: lines }, { data: orgs }] = await Promise.all([
+    db.from('request').select('id,name,client_name,currency').eq('id', reqId).single(),
+    db.from('voucher').select('*').eq('request_id', reqId),
+    db.from('request_line').select('*').eq('request_id', reqId).eq('confirmation', 'confirmed'),
+    db.from('organization').select('id,name'),
+  ]);
+  const rtIds = (lines || []).filter(l => l.type === 'HOTEL').map(l => l.resource_id);
+  const vcIds = (lines || []).filter(l => l.type === 'TRANSPORT').map(l => l.resource_id);
+  const [{ data: rts }, { data: vcs }] = await Promise.all([
+    rtIds.length ? db.from('room_type').select('id,name,property_id').in('id', rtIds) : Promise.resolve({ data: [] }),
+    vcIds.length ? db.from('vehicle_class').select('id,name').in('id', vcIds) : Promise.resolve({ data: [] }),
+  ]);
+  const propIds = (rts || []).map(r => r.property_id);
+  const { data: props } = propIds.length ? await db.from('property').select('id,name,city').in('id', propIds) : { data: [] };
+  const propById = Object.fromEntries((props || []).map(p => [p.id, p]));
+  const rtById = Object.fromEntries((rts || []).map(r => [r.id, { ...r, prop: propById[r.property_id] }]));
+  const vcById = Object.fromEntries((vcs || []).map(v => [v.id, v]));
+  const orgName = Object.fromEntries((orgs || []).map(o => [o.id, o.name]));
+  const resName = (l) => l.type === 'HOTEL'
+    ? `${rtById[l.resource_id]?.prop?.name || ''} — ${rtById[l.resource_id]?.name || ''}${rtById[l.resource_id]?.prop?.city ? ' · ' + rtById[l.resource_id].prop.city : ''}`
+    : (vcById[l.resource_id]?.name || 'Транспорт');
+  const bySup = {}; (lines || []).forEach(l => { (bySup[l.supplier_org_id] = bySup[l.supplier_org_id] || []).push(l); });
+  const vouBySup = Object.fromEntries((vouchers || []).map(v => [v.supplier_org_id, v]));
+
+  main.innerHTML = `
+    <div class="page-head no-print"><div><h1>Ваучеры · ${esc(req?.name || '')}</h1><div class="sub">Документ исполнения для поставщика — печатайте и передавайте при заселении/трансфере.</div></div>
+      <div><button class="btn btn--ghost" id="vouBack">← Назад</button> <button class="btn btn--primary" id="vouPrint">Печать</button></div></div>
+    ${Object.keys(bySup).map(sup => { const v = vouBySup[sup]; return `
+      <div class="card voucher-card" style="margin-bottom:14px"><div style="padding:18px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid var(--ink);padding-bottom:10px;margin-bottom:12px">
+          <div><div style="font-size:20px;font-weight:700">Waylo<span style="color:var(--accent)">›</span> Ваучер</div><div class="hint">VOUCHER / CONFIRMATION</div></div>
+          <div style="text-align:right"><div class="mono"><b>${esc(v?.voucher_no || '—')}</b></div><div class="hint">${v?.issued_at ? esc(new Date(v.issued_at).toLocaleDateString('ru-RU')) : ''}</div></div>
+        </div>
+        <div class="row" style="gap:24px;margin-bottom:10px">
+          <div><div class="hint">Поставщик</div><b>${esc(orgName[sup] || '—')}</b></div>
+          <div><div class="hint">Тур</div><b>${esc(req?.name || '—')}</b></div>
+          <div><div class="hint">Турист / группа</div><b>${esc(req?.client_name || '—')}</b></div>
+        </div>
+        <table><thead><tr><th>Услуга</th><th>Период</th><th style="text-align:center">Кол-во</th></tr></thead><tbody>
+          ${bySup[sup].map(l => `<tr><td>${esc(resName(l))}</td><td class="hint">${esc(l.from_date)} — ${esc(l.to_date)}</td><td class="mono" style="text-align:center">${l.quantity}</td></tr>`).join('')}
+        </tbody></table>
+        <div class="hint" style="margin-top:12px">Подтверждено и оплачено через Waylo. Код заявки: ${short(reqId)}.</div>
+      </div></div>`; }).join('') || `<div class="card"><div class="card-empty">Нет подтверждённых услуг для ваучера.</div></div>`}`;
+  const back = $('#vouBack'); if (back) back.onclick = () => dmcPayments(active);
+  const pr = $('#vouPrint'); if (pr) pr.onclick = () => window.print();
+}
+
+/* ── Платформа · Сверка (0020) ───────────────────────────────────────────────*/
+async function platformReconcile() {
+  const main = $('#main'); if (!main) return;
+  const [{ data: reqs }, { data: orgs }, { data: setting }, { data: recons }] = await Promise.all([
+    db.from('request').select('id,name,dmc_org_id,payment_code,currency,created_at').not('payment_code', 'is', null).order('created_at', { ascending: false }),
+    db.from('organization').select('id,name'),
+    db.from('platform_setting').select('value').eq('key', 'service_fee'),
+    db.from('reconciliation').select('request_id,status,buyer_total,paid_amount,confirmed_total,discrepancy,created_at').order('created_at', { ascending: false }),
+  ]);
+  const ids = (reqs || []).map(r => r.id);
+  const [{ data: lines }, { data: events }] = await Promise.all([
+    ids.length ? db.from('request_line').select('request_id,sell_price,quantity,from_date,to_date').in('request_id', ids) : Promise.resolve({ data: [] }),
+    ids.length ? db.from('payment_event').select('request_id,amount,status').in('request_id', ids) : Promise.resolve({ data: [] }),
+  ]);
+  const fee = (setting && setting[0] && setting[0].value) || { fee_type: 'percent', fee_value: 0 };
+  const orgName = Object.fromEntries((orgs || []).map(o => [o.id, o.name]));
+  const linesBy = {}; (lines || []).forEach(l => { (linesBy[l.request_id] = linesBy[l.request_id] || []).push(l); });
+  const paidBy = {}; (events || []).forEach(e => { if (e.status === 'paid') paidBy[e.request_id] = (paidBy[e.request_id] || 0) + Number(e.amount || 0); });
+  const lastRec = {}; (recons || []).forEach(r => { if (!lastRec[r.request_id]) lastRec[r.request_id] = r; });
+  const lt = (id) => (linesBy[id] || []).reduce((s, l) => s + Number(l.sell_price || 0) * l.quantity * _nights(l), 0);
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Сверка</h1><div class="sub">Счёт ↔ оплата ↔ исполнение по заявкам. «Сверить» фиксирует снимок состояния.</div></div></div>
+    <div id="rcMsg"></div>
+    <div class="card"><div class="card-head">Заявки со счётом (${(reqs || []).length})</div>
+    ${(reqs || []).length ? `<table><thead><tr><th>Тур</th><th>DMC</th><th style="text-align:right">К оплате</th><th style="text-align:right">Оплачено</th><th>Сверка</th><th></th></tr></thead><tbody>
+      ${reqs.map(r => { const x = lt(r.id), t = x + _feeOf(fee, x), paid = paidBy[r.id] || 0; const rec = lastRec[r.id];
+        const recBadge = !rec ? '<span class="badge badge--gray">не сверено</span>'
+          : rec.status === 'matched' ? '<span class="badge badge--green">сверено</span>'
+          : `<span class="badge badge--red">расхождение ${money(rec.discrepancy, r.currency)}</span>`;
+        return `<tr>
+          <td><b>${esc(r.name || '—')}</b></td>
+          <td>${esc(orgName[r.dmc_org_id] || '—')}</td>
+          <td class="price" style="text-align:right">${money(t, r.currency)}</td>
+          <td class="price" style="text-align:right">${money(paid, r.currency)}</td>
+          <td>${recBadge}${rec ? `<div class="hint">${esc(new Date(rec.created_at).toLocaleDateString('ru-RU'))}</div>` : ''}</td>
+          <td style="text-align:right"><button class="btn btn--ghost btn--sm recBtn" data-req="${r.id}">Сверить</button></td>
+        </tr>`; }).join('')}
+    </tbody></table>` : `<div class="card-empty">Нет заявок со счётом.</div>`}</div>`;
+
+  document.querySelectorAll('.recBtn').forEach(b => b.onclick = async () => {
+    b.disabled = true; b.textContent = 'Сверяем…';
+    const { error } = await db.rpc('run_reconciliation', { p_request: b.dataset.req });
+    if (error) { $('#rcMsg').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; b.disabled = false; b.textContent = 'Сверить'; }
+    else platformReconcile();
+  });
+}
+
 async function renderPlatform() {
   if (!state.tab) state.tab = 'orgs';
-  navShell('Платформа · Waylo', [{ id:'orgs', label:'Организации' }, { id:'pricing', label:'Цены' }, { id:'payments', label:'Оплаты' }, { id:'invoices', label:'Деньги' }, { id:'log', label:'Журнал' }]);
+  navShell('Платформа · Waylo', [{ id:'orgs', label:'Организации' }, { id:'pricing', label:'Цены' }, { id:'payments', label:'Оплаты' }, { id:'recon', label:'Сверка' }, { id:'invoices', label:'Деньги' }, { id:'log', label:'Журнал' }]);
   const main = $('#main'); if (!main) return;
   if (state.tab === 'pricing') return platformPricing();
   if (state.tab === 'log') return platformLog();
   if (state.tab === 'payments') return platformPayments();
+  if (state.tab === 'recon') return platformReconcile();
   if (state.tab === 'orgs') {
     const [{ data: orgs }, { data: invs }] = await Promise.all([
       db.from('organization').select('*').order('type'),
