@@ -2020,22 +2020,16 @@ function renderCalc(active) {
     <input type="number" min="0" class="cMs" data-i="${i}" value="${m.sum || ''}" placeholder="0">
     <button class="cdel" data-act="delmisc" data-i="${i}">×</button>
   </div>`).join('');
-  const ip = 'style="width:88px;font:inherit;font-size:13.5px;border:1px solid var(--line);border-radius:8px;padding:7px 9px;background:var(--surface);color:var(--ink)"';
 
   ensureCalcStyle();
   $('#calcWrap').innerHTML = `<div class="wcalc">
-    <div class="card" style="margin-bottom:14px">
-      <div style="display:flex;align-items:center;gap:14px;padding:12px 16px;flex-wrap:wrap">
-        <div style="font-weight:600;font-size:14px">Калькулятор тура</div>
-        <span class="hint">PAX тура: <b style="color:var(--ink)">${(calcTour && calcTour.pax) || '—'}</b></span>
-        <div style="display:flex;align-items:center;gap:8px"><span class="hint">Прибыль $/чел</span><input type="number" min="0" id="cProfit" value="${s.profit}" ${ip}></div>
-        <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
-          <span id="cSaveMsg" class="hint"></span>
-          <button class="btn btn--ghost btn--sm" id="cSaveBtn">Сохранить</button>
-          <button class="btn btn--primary btn--sm" id="cBookBtn">Забронировать</button>
-        </div>
+    <div class="card" style="margin-bottom:14px"><div style="padding:16px 20px;display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px">
+      <div>
+        <div style="font-size:18px;font-weight:600">${esc((calcTour && calcTour.name) || 'Тур')} ${(calcTour && calcTour.pax) ? `<span class="hint mono">PAX ${calcTour.pax}</span>` : ''}</div>
+        <div class="hint" style="margin-top:4px">${esc(active.orgName || '')}${(calcTour && calcTour.start) ? ' · от ' + esc(calcTour.start) : ''}</div>
       </div>
-    </div>
+      <div style="text-align:right"><div class="hint">Валюта</div><div class="mono" style="font-weight:600;font-size:16px">${esc((calcTour && calcTour.currency) || 'USD')}</div></div>
+    </div></div>
     <div class="clayout">
       <div class="cinputs">
 
@@ -2063,11 +2057,32 @@ function renderCalc(active) {
       </div>
 
       <div class="cresult">
-        <div class="card">
-          <div class="card-head">Цена для клиента</div>
-          <div class="hint" style="padding:8px 14px 0">Twin/DBL · 1–39 чел · с прибылью</div>
-          <div style="max-height:560px;overflow:auto;margin-top:8px"><table class="crt"><thead><tr><th>Чел</th><th>FOC</th><th>без FOC</th><th>Группа</th></tr></thead>
-          <tbody id="cResBody"><tr><td colspan="4" class="crph">Добавьте локации<br>маршрута</td></tr></tbody></table></div>
+        <div class="card" style="overflow:hidden">
+          <div style="padding:18px 20px;background:var(--accent);color:#eafaf6">
+            <div style="font-size:12.5px;opacity:.85">Цена с человека · PAX ${(calcTour && calcTour.pax) || '—'}</div>
+            <div id="cMain" style="font-family:var(--mono);font-size:34px;font-weight:600;letter-spacing:-.01em;margin-top:2px">—</div>
+            <div style="display:flex;gap:18px;margin-top:8px;font-size:12px">
+              <div>FOC лидер: <b id="cFoc" style="font-family:var(--mono)">—</b></div>
+              <div>Группа: <b id="cGrp" style="font-family:var(--mono)">—</b></div>
+            </div>
+          </div>
+          <div style="padding:14px 16px 8px;display:flex;align-items:center;justify-content:space-between">
+            <span class="hint">Прибыль $/чел</span>
+            <div style="display:flex;align-items:center;gap:12px;border:1px solid var(--line);border-radius:8px;padding:5px 12px">
+              <span id="cProfMinus" style="cursor:pointer;color:var(--muted);user-select:none;font-size:16px">−</span>
+              <span id="cProfVal" style="font-family:var(--mono);font-weight:600;min-width:26px;text-align:center">${s.profit}</span>
+              <span id="cProfPlus" style="cursor:pointer;color:var(--muted);user-select:none;font-size:16px">+</span>
+            </div>
+          </div>
+          <div class="cghead" style="grid-template-columns:.6fr 1fr 1fr 1.1fr;padding:8px 16px 6px;border-top:1px solid var(--line-2)"><div>PAX</div><div class="cright">Без FOC</div><div class="cright">FOC</div><div class="cright">Группа</div></div>
+          <div style="max-height:340px;overflow:auto"><table class="crt" style="table-layout:fixed;width:100%"><tbody id="cResBody"><tr><td colspan="4" class="crph">Добавьте локации<br>маршрута</td></tr></tbody></table></div>
+          <div style="padding:14px 16px;border-top:1px solid var(--line-2)">
+            <div id="cSaveMsg" class="hint" style="margin-bottom:8px;min-height:14px"></div>
+            <div style="display:flex;gap:9px">
+              <button class="btn btn--ghost btn--sm" id="cSaveBtn" style="flex:1">Сохранить</button>
+              <button class="btn btn--primary btn--sm" id="cBookBtn" style="flex:1.3">Забронировать</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -2127,6 +2142,10 @@ function bindCalc(active) {
     else if (t.classList.contains('cMs')) { s.misc[i].sum = +v || 0; calcCompute(); }
   });
 
+  const _pm = $('#cProfMinus'), _pp = $('#cProfPlus');
+  const _setProf = (d) => { s.profit = Math.max(0, (s.profit || 0) + d); const pv = $('#cProfVal'); if (pv) pv.textContent = s.profit; calcCompute(); };
+  if (_pm) _pm.onclick = () => _setProf(-5);
+  if (_pp) _pp.onclick = () => _setProf(5);
   $('#cSaveBtn').onclick = () => calcSave();
   $('#cBookBtn').onclick = () => calcBook();
 }
@@ -2155,8 +2174,16 @@ function calcCompute() {
     const foc = noFoc + hotelSgl1 / pax;
     const grp = noFoc * pax;
     const cls = (pax === bestPax ? 'best ' : '') + (pax === tourPax ? 'tourpax' : '');
-    html += `<tr class="${cls.trim()}"><td>${pax}</td><td class="num" style="color:var(--accent-ink)">$${Math.round(foc).toLocaleString('ru')}</td><td class="num">$${Math.round(noFoc).toLocaleString('ru')}</td><td class="num" style="color:var(--muted)">$${Math.round(grp).toLocaleString('ru')}</td></tr>`;
+    html += `<tr class="${cls.trim()}"><td>${pax}</td><td class="num">$${Math.round(noFoc).toLocaleString('ru')}</td><td class="num" style="color:var(--accent-ink)">$${Math.round(foc).toLocaleString('ru')}</td><td class="num" style="color:var(--muted)">$${Math.round(grp).toLocaleString('ru')}</td></tr>`;
   }
+  const _tp = (calcTour && calcTour.pax) || 0;
+  const _setT = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  if (_tp >= 1 && _tp <= 39) {
+    const _c = hotelCost(_tp) + totalFixed, _no = _c / _tp + profit, _fo = _no + hotelSgl1 / _tp, _gr = _no * _tp;
+    _setT('cMain', '$' + Math.round(_no).toLocaleString('ru'));
+    _setT('cFoc', '$' + Math.round(_fo).toLocaleString('ru'));
+    _setT('cGrp', '$' + Math.round(_gr).toLocaleString('ru'));
+  } else { _setT('cMain', '—'); _setT('cFoc', '—'); _setT('cGrp', '—'); }
   body.innerHTML = html;
 }
 
