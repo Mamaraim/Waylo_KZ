@@ -92,7 +92,7 @@ function renderLogin() {
   let seg = SEGMENTS[0];
   app.innerHTML = `
     <div class="login-wrap"><form class="login-card" id="loginForm">
-      <div class="brand">Waylo<span class="chev">›</span><span class="kz">KZ</span></div>
+      <div class="brand">Waylo</div>
       <div class="tag">Операционный коридор · вход в кабинет</div>
       <div class="field"><label>Кто вы?</label>
         <select class="input" id="segSel" style="width:100%">${SEGMENTS.map(s => `<option value="${s.key}" ${s.key===seg.key?'selected':''}>${esc(s.label)}</option>`).join('')}</select>
@@ -132,7 +132,7 @@ function renderLogin() {
 function renderSignup() {
   app.innerHTML = `
     <div class="login-wrap"><form class="login-card" id="suForm">
-      <div class="brand">Waylo<span class="chev">›</span><span class="kz">KZ</span></div>
+      <div class="brand">Waylo</div>
       <div class="tag">Регистрация компании</div>
       <div class="seg-sub">Выберите, кто вы — создадим кабинет нужного типа, вы станете суперадмином. Если вас пригласили в существующую компанию, доступ выдастся по приглашению автоматически (тип и название можно не трогать).</div>
       <div class="field"><label>Тип компании</label>
@@ -187,7 +187,7 @@ function renderShell() {
   app.innerHTML = `
     <div class="appwrap">
       <aside class="sidebar">
-        <div class="side-brand">waylo<span>/ kz</span></div>
+        <div class="side-brand">Waylo</div>
         <div class="side-cab">
           ${state.contexts.length > 1 ? `<select id="orgSel" class="input">${state.contexts.map(c => `<option value="${c.key}" ${c.key===state.activeKey?'selected':''}>${esc(c.orgName)}${c.kind==='org'?` · ${c.orgType}`:''}</option>`).join('')}</select>` : ''}
           ${active ? `<div class="org-chip"><div class="org-tag">${esc(tag)}</div><div class="org-meta"><div class="org-name">${esc(active.orgName||'')}</div><div class="org-role">${esc(roleLabel[active.role]||active.role||'')}</div></div></div>` : ''}
@@ -599,7 +599,7 @@ async function renderVoucher(reqId, lines) {
     <style>@media print{body>*:not(#voucherOverlay){display:none!important}#voucherOverlay{position:static!important;background:#fff!important;padding:0!important;display:block!important}#voucherOverlay .vchr-actions{display:none!important}#voucherOverlay .vchr-doc{box-shadow:none!important;width:100%!important;max-width:none!important}}</style>
     <div class="vchr-doc" style="background:#fff;width:760px;max-width:100%;border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.3);font-family:system-ui,'Segoe UI',sans-serif;color:#1a2530">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;padding:32px 36px 20px;border-bottom:2px solid #0a7d6c">
-        <div><div style="font-size:22px;font-weight:700;color:#0a7d6c">Waylo <span style="color:#1a2530">KZ</span></div><div style="font-size:12px;color:#6b7a89;margin-top:2px">Операционный коридор · Узбекистан</div></div>
+        <div><div style="font-size:22px;font-weight:700;color:#0a7d6c">Waylo</div><div style="font-size:12px;color:#6b7a89;margin-top:2px">Операционный коридор · Узбекистан</div></div>
         <div style="text-align:right"><div style="font-size:20px;font-weight:700;letter-spacing:1px">ВАУЧЕР</div><div style="font-size:12px;color:#6b7a89">VOUCHER</div></div>
       </div>
       <div style="display:flex;flex-wrap:wrap;gap:18px;justify-content:space-between;padding:20px 36px;font-size:13px">
@@ -1717,7 +1717,7 @@ async function dmcVoucher(active, reqId) {
     ${Object.keys(bySup).map(sup => { const v = vouBySup[sup]; return `
       <div class="card voucher-card" style="margin-bottom:14px"><div style="padding:18px">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid var(--ink);padding-bottom:10px;margin-bottom:12px">
-          <div><div style="font-size:20px;font-weight:700">Waylo<span style="color:var(--accent)">›</span> Ваучер</div><div class="hint">VOUCHER / CONFIRMATION</div></div>
+          <div><div style="font-size:20px;font-weight:700">Waylo Ваучер</div><div class="hint">VOUCHER / CONFIRMATION</div></div>
           <div style="text-align:right"><div class="mono"><b>${esc(v?.voucher_no || '—')}</b></div><div class="hint">${v?.issued_at ? esc(new Date(v.issued_at).toLocaleDateString('ru-RU')) : ''}</div></div>
         </div>
         <div class="row" style="gap:24px;margin-bottom:10px">
