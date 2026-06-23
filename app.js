@@ -9,10 +9,10 @@ const app = document.getElementById('app');
 
 // lock:noLock убирает зависания supabase-js (межвкладочный navigator.locks).
 // С ним сессию можно безопасно хранить — persistSession:true, чтобы НЕ выкидывать
-// из кабинета при обновлении страницы; autoRefreshToken:true продлевает токен.
+// из кабинета при обновлении страницы. autoRefreshToken НЕ включаем — он вешал supabase-js.
 const noLock = async (_name, _timeout, fn) => await fn();
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: { lock: noLock, persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+  auth: { lock: noLock, persistSession: true, autoRefreshToken: false, detectSessionInUrl: true },
 });
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
