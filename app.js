@@ -230,39 +230,141 @@ function navShell(kicker, tabs) {
 
 /* ── DMC ─────────────────────────────────────────────────────────────────── */
 async function renderDmc(active) {
-  if (!state.tab) state.tab = 'catalog';
-  navShell('DMC · ' + active.orgName, [{ id:'catalog', label:'Каталог' }, { id:'requests', label:'Туры' }, { id:'pay', label:'Оплаты' }, { id:'finance', label:'Финансы' }]);
-  if (state.tab === 'catalog') dmcCatalog();
+  if (!state.tab || !['dash','catalog','requests','pay','finance'].includes(state.tab)) state.tab = 'dash';
+  navShell('DMC · ' + active.orgName, [
+    { id:'dash', label:'Дашборд' },
+    { id:'catalog', label:'Каталог' },
+    { id:'requests', label:'Туры' },
+    { id:'pay', label:'Оплаты' },
+    { id:'finance', label:'Финансы' },
+  ]);
+  if (state.tab === 'dash') dmcDashboard(active);
+  else if (state.tab === 'catalog') dmcCatalog();
   else if (state.tab === 'pay') dmcPayments(active);
   else if (state.tab === 'finance') dmcFinance(active);
   else dmcRequests(active);
 }
 
+/* ── DMC · Дашборд (Atlas, на реальных данных) ───────────────────────────────*/
+async function dmcDashboard(active) {
+  const main = $('#main'); if (!main) return;
+  const { data: reqs } = await db.from('request')
+    .select('id,name,client_name,status,payment_code,currency,pax_count,created_at')
+    .eq('dmc_org_id', active.orgId).order('created_at', { ascending: false });
+  const ids = (reqs || []).map(r => r.id);
+  const [{ data: lines }, { data: events }] = await Promise.all([
+    ids.length ? db.from('request_line').select('request_id,sell_price,quantity,from_date,to_date,confirmation').in('request_id', ids) : Promise.resolve({ data: [] }),
+    ids.length ? db.from('payment_event').select('request_id,amount,status').in('request_id', ids) : Promise.resolve({ data: [] }),
+  ]);
+  const nights = (l) => Math.max(1, Math.round((new Date(l.to_date) - new Date(l.from_date)) / 86400000));
+  const linesBy = {}; (lines || []).forEach(l => { (linesBy[l.request_id] = linesBy[l.request_id] || []).push(l); });
+  const paidBy = {}; (events || []).forEach(e => { if (e.status === 'paid') paidBy[e.request_id] = (paidBy[e.request_id] || 0) + Number(e.amount || 0); });
+  const sumOf = (id) => (linesBy[id] || []).reduce((s, l) => s + Number(l.sell_price || 0) * l.quantity * nights(l), 0);
+  const confOf = (id) => { const ls = linesBy[id] || []; if (!ls.length) return 'none'; const c = ls.filter(l => l.confirmation === 'confirmed').length; return c === 0 ? 'none' : c === ls.length ? 'all' : 'part'; };
+  const list = reqs || [];
+  const cur = (list[0] && list[0].currency) || 'USD';
+  const kAwaiting = list.filter(r => r.payment_code && (paidBy[r.id] || 0) < sumOf(r.id)).length;
+  const kPaid = list.filter(r => sumOf(r.id) > 0 && (paidBy[r.id] || 0) >= sumOf(r.id)).length;
+  const kPipeline = list.reduce((s, r) => s + sumOf(r.id), 0);
+
+  const actions = [];
+  list.forEach(r => {
+    const sum = sumOf(r.id), paid = paidBy[r.id] || 0;
+    if (sum > 0 && !r.payment_code) actions.push({ issue: 'Выставить счёт клиенту', code: r.name || '—', who: r.client_name || '', dot: 'var(--blue)', act: 'К оплатам' });
+    else if (r.payment_code && paid < sum) actions.push({ issue: 'Ожидает оплаты', code: r.name || '—', who: r.client_name || '', dot: 'var(--amber)', act: 'Открыть' });
+    else if (sum > 0 && paid >= sum && confOf(r.id) !== 'all') actions.push({ issue: 'Ждёт подтверждения поставщика', code: r.name || '—', who: r.client_name || '', dot: 'var(--accent)', act: 'Открыть' });
+  });
+
+  const opBadge = (r) => { const sum = sumOf(r.id), paid = paidBy[r.id] || 0; if (sum > 0 && paid >= sum) return '<span class="badge badge--green">оплачено</span>'; if (r.payment_code) return '<span class="badge badge--amber">ожидает</span>'; return '<span class="badge badge--gray">нет счёта</span>'; };
+  const cfBadge = (r) => { const c = confOf(r.id); return c === 'all' ? '<span class="badge badge--accent">подтв.</span>' : c === 'part' ? '<span class="badge badge--amber">частично</span>' : '<span class="badge badge--gray">—</span>'; };
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Дашборд</h1><div class="sub">${esc(active.orgName)} · что двигает сделки дальше</div></div></div>
+    <div class="kpi-grid">
+      <div class="kpi"><div class="label">Туров всего</div><div class="value">${list.length}</div><div class="delta" style="color:var(--muted)">в контуре</div></div>
+      <div class="kpi"><div class="label">Ждут оплаты</div><div class="value" style="color:var(--amber)">${kAwaiting}</div><div class="delta" style="color:var(--muted)">счёт выставлен</div></div>
+      <div class="kpi"><div class="label">Оплачено</div><div class="value" style="color:var(--green)">${kPaid}</div><div class="delta" style="color:var(--muted)">готовы к ваучеру</div></div>
+      <div class="kpi"><div class="label">Сумма в работе</div><div class="value">${money(kPipeline, cur)}</div><div class="delta" style="color:var(--muted)">по всем турам</div></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <div class="card-head">Требуют действия <span class="badge badge--${actions.length ? 'red' : 'gray'}">${actions.length}</span></div>
+      ${actions.length ? actions.map(a => `<div class="act-row">
+        <span class="act-dot" style="background:${a.dot}"></span>
+        <div style="flex:1;min-width:0"><div style="font-size:13.5px;font-weight:500">${esc(a.issue)}</div><div class="hint mono" style="font-size:11px">${esc(a.code)}${a.who ? ' · ' + esc(a.who) : ''}</div></div>
+        <button class="btn btn--ghost btn--sm goPay">${esc(a.act)}</button>
+      </div>`).join('') : `<div class="card-empty">Нет задач — всё в порядке.</div>`}
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <div class="card-head">Сделки в работе <span class="hint" style="font-weight:500">${list.length} в контуре</span></div>
+      ${list.length ? `<table><thead><tr><th>Тур</th><th>Клиент</th><th style="text-align:right">Гости</th><th style="text-align:right">Сумма</th><th>Оплата</th><th>Подтв.</th></tr></thead><tbody>
+        ${list.map(r => `<tr>
+          <td><b>${esc(r.name || '—')}</b>${r.payment_code ? ` <span class="id-cell">${esc(r.payment_code)}</span>` : ''}</td>
+          <td>${esc(r.client_name || '—')}</td>
+          <td style="text-align:right" class="mono">${r.pax_count || '—'}</td>
+          <td style="text-align:right" class="price">${money(sumOf(r.id), r.currency)}</td>
+          <td>${opBadge(r)}</td>
+          <td>${cfBadge(r)}</td>
+        </tr>`).join('')}
+      </tbody></table>` : `<div class="card-empty">Туров пока нет. Создайте тур во вкладке «Туры».</div>`}
+    </div>`;
+
+  document.querySelectorAll('.goPay').forEach(b => b.onclick = () => { state.tab = 'pay'; renderCabinet(); });
+}
+
+/* ── DMC · Каталог (Atlas-карточки, на реальных данных) ──────────────────────*/
 async function dmcCatalog() {
+  const main = $('#main'); if (!main) return;
   const [{ data: props }, { data: types }, { data: rates, error }, { data: vcs }, { data: trates }] = await Promise.all([
     db.from('property').select('id,name,city,kind,star_category').eq('is_active', true),
     db.from('room_type').select('id,property_id,name'),
-    db.from('room_rate_public').select('room_type_id,sell_price,sgl_supplement,currency,valid_from,valid_to'),
+    db.from('room_rate_public').select('room_type_id,sell_price,currency'),
     db.from('vehicle_class').select('id,name,pax_min,pax_max'),
-    db.from('transport_rate_public').select('vehicle_class_id,basis,sell_price_per_unit,currency,valid_from,valid_to'),
+    db.from('transport_rate_public').select('vehicle_class_id,basis,sell_price_per_unit,currency'),
   ]);
-  const main = $('#main'); if (!main) return;
   if (error) { main.innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; return; }
-  const pById = Object.fromEntries((props || []).map(p => [p.id, p]));
   const tById = Object.fromEntries((types || []).map(t => [t.id, t]));
-  const rows = (rates || []).map(r => { const t = tById[r.room_type_id]; const p = t && pById[t.property_id]; return p ? { ...r, room:t.name, property:p.name, city:p.city, kind:p.kind, star:p.star_category } : null; }).filter(Boolean);
+  const rateByRt = {}; (rates || []).forEach(r => { if (!rateByRt[r.room_type_id]) rateByRt[r.room_type_id] = r; });
+  // группируем тарифы по объекту: мин. цена + число категорий
+  const byProp = {};
+  (rates || []).forEach(r => { const t = tById[r.room_type_id]; if (!t) return; const pid = t.property_id; const e = byProp[pid] || { min: Infinity, cats: 0, cur: r.currency }; e.min = Math.min(e.min, Number(r.sell_price) || 0); e.cats += 1; byProp[pid] = e; });
+  const cards = (props || []).filter(p => byProp[p.id]).map(p => ({ ...p, min: byProp[p.id].min, cats: byProp[p.id].cats, cur: byProp[p.id].cur }))
+    .sort((a, b) => (a.city || '').localeCompare(b.city || '', 'ru'));
   const vById = Object.fromEntries((vcs || []).map(v => [v.id, v]));
-  const trows = (trates || []).map(r => { const v = vById[r.vehicle_class_id]; return v ? { ...r, vname:v.name, pax:`${v.pax_min}–${v.pax_max}` } : null; }).filter(Boolean);
+  const trows = (trates || []).map(r => { const v = vById[r.vehicle_class_id]; return v ? { ...r, vname: v.name, pax: `${v.pax_min}–${v.pax_max}` } : null; }).filter(Boolean);
+  const KIND = { city: 'Отель', resort: 'Резорт' };
+
   main.innerHTML = `
-    <div class="page-head"><div><h1>Каталог</h1><div class="sub">Цена — к продаже. Контрактная себестоимость поставщика вам не видна.</div></div></div>
-    <div class="card"><div class="card-head">Размещения</div>
-    ${rows.length ? `<table><thead><tr><th>Объект</th><th>Город</th><th>Номер</th><th>Период</th><th style="text-align:right">Цена/ночь</th><th style="text-align:right">SGL</th></tr></thead><tbody>
-      ${rows.map(r => `<tr><td>${esc(r.property)}${r.kind==='resort'?' <span class="badge badge--accent">резорт</span>':''}${r.star?` <span class="hint">· ${r.star}★</span>`:''}</td><td>${esc(r.city)}</td><td>${esc(r.room)}</td><td class="hint">${esc(r.valid_from)} — ${esc(r.valid_to)}</td><td class="price" style="text-align:right">${money(r.sell_price,r.currency)}</td><td class="mono" style="text-align:right">${money(r.sgl_supplement,r.currency)}</td></tr>`).join('')}
-    </tbody></table>` : `<div class="card-empty">Пока нет активных тарифов.</div>`}</div>
-    <div class="card"><div class="card-head">Трансферы</div>
-    ${trows.length ? `<table><thead><tr><th>Класс машины</th><th>Pax</th><th>Тариф</th><th>Период</th><th style="text-align:right">Цена</th></tr></thead><tbody>
-      ${trows.map(r => `<tr><td>${esc(r.vname)}</td><td class="mono">${esc(r.pax)}</td><td class="hint">${r.basis==='per_transfer'?'за трансфер':'за день'}</td><td class="hint">${esc(r.valid_from)} — ${esc(r.valid_to)}</td><td class="price" style="text-align:right">${money(r.sell_price_per_unit,r.currency)}</td></tr>`).join('')}
+    <div class="page-head"><div><h1>Каталог</h1><div class="sub">Цена — к продаже. Контрактная себестоимость поставщика не видна.</div></div>
+      <input id="catSearch" placeholder="Поиск по городу или названию" style="min-width:240px"></div>
+    <div id="catGrid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px">
+      ${cards.length ? cards.map(c => `
+        <div class="card catCard" data-q="${esc((c.name + ' ' + c.city).toLowerCase())}">
+          <div style="height:110px;background:repeating-linear-gradient(135deg,var(--line-2) 0 12px,var(--line) 12px 24px);position:relative;display:flex;align-items:flex-end;padding:12px">
+            <span style="background:rgba(255,255,255,.92);border-radius:7px;padding:4px 9px;font-size:11px;font-weight:600;color:${c.kind === 'resort' ? 'var(--accent-ink)' : 'var(--ink-2)'}">${esc(KIND[c.kind] || 'Объект')}</span>
+            ${c.star_category ? `<span style="position:absolute;top:12px;right:12px;font-size:12px;color:var(--amber);font-weight:600">${'★'.repeat(c.star_category)}</span>` : ''}
+          </div>
+          <div style="padding:15px 17px">
+            <div style="font-weight:600;font-size:15px">${esc(c.name)}</div>
+            <div class="hint">${esc(c.city || '')}</div>
+            <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-top:14px;padding-top:13px;border-top:1px solid var(--line-2)">
+              <div><div style="font-size:11px;color:var(--muted)">от · за ночь</div><div class="price" style="font-size:18px">${money(c.min, c.cur)}</div></div>
+              <div class="hint" style="color:var(--accent-ink);font-weight:600">${c.cats} категор.</div>
+            </div>
+          </div>
+        </div>`).join('') : `<div class="card" style="grid-column:1/-1"><div class="card-empty">Пока нет объектов с ценой. Платформа задаёт цены во вкладке «Цены».</div></div>`}
+    </div>
+    <div class="card" style="margin-top:16px"><div class="card-head">Трансферы</div>
+    ${trows.length ? `<table><thead><tr><th>Класс машины</th><th>Pax</th><th>Тариф</th><th style="text-align:right">Цена</th></tr></thead><tbody>
+      ${trows.map(r => `<tr><td><b>${esc(r.vname)}</b></td><td class="mono">${esc(r.pax)}</td><td class="hint">${r.basis === 'per_transfer' ? 'за трансфер' : 'за день'}</td><td class="price" style="text-align:right">${money(r.sell_price_per_unit, r.currency)}</td></tr>`).join('')}
     </tbody></table>` : `<div class="card-empty">Пока нет трансферов.</div>`}</div>`;
+
+  const search = $('#catSearch');
+  if (search) search.oninput = () => {
+    const q = (search.value || '').trim().toLowerCase();
+    document.querySelectorAll('.catCard').forEach(el => { el.style.display = !q || el.dataset.q.includes(q) ? '' : 'none'; });
+  };
 }
 
 async function dmcRequests(active) {
