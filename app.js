@@ -1049,6 +1049,29 @@ let catForm = null;          // null | {} (новая) | объект катег
 let bkProp = null, bkFrom = null;
 let propForm = null;  // null | {} (новый объект) | объект property (правка)
 
+// загрузка фото с диска: сжатие в браузере → data-URL в скрытое поле (хранится в БД, колонка photo_url)
+function pickPhoto(fileInputId, hiddenId, prevId) {
+  const fi = document.getElementById(fileInputId); if (!fi) return;
+  fi.onchange = () => {
+    const f = fi.files && fi.files[0]; if (!f) return;
+    const rd = new FileReader();
+    rd.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const max = 900; let w = img.width, h = img.height;
+        if (w > max || h > max) { const k = Math.min(max / w, max / h); w = Math.round(w * k); h = Math.round(h * k); }
+        const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+        cv.getContext('2d').drawImage(img, 0, 0, w, h);
+        const data = cv.toDataURL('image/jpeg', 0.75);
+        const hid = document.getElementById(hiddenId); if (hid) hid.value = data;
+        const pv = document.getElementById(prevId); if (pv) pv.innerHTML = `<img src="${data}" style="height:54px;border-radius:6px;object-fit:cover">`;
+      };
+      img.src = rd.result;
+    };
+    rd.readAsDataURL(f);
+  };
+}
+
 async function hotelCats(active) {
   const main = $('#main'); if (!main) return;
   const { data: props } = await db.from('property').select('id,name,city,kind,star_category,is_active').eq('org_id', active.orgId).order('name');
@@ -1070,7 +1093,7 @@ async function hotelCats(active) {
         <div class="field" style="width:170px"><label>Тип</label><select class="input" id="pfKind"><option value="city" ${p.kind !== 'resort' ? 'selected' : ''}>Городской отель</option><option value="resort" ${p.kind === 'resort' ? 'selected' : ''}>Резорт</option></select></div>
         <div class="field" style="width:90px"><label>Звёзды</label><input type="number" min="1" max="5" class="input" id="pfStar" value="${p.star_category || 4}"></div>
         <div class="field" style="width:90px"><label>Активен</label><select class="input" id="pfAct"><option value="1" ${p.is_active !== false ? 'selected' : ''}>Да</option><option value="0" ${p.is_active === false ? 'selected' : ''}>Нет</option></select></div>
-        <div class="field" style="flex:1;min-width:240px"><label>Фото (URL картинки)</label><input class="input" id="pfPhoto" value="${esc(p.photo_url || '')}" placeholder="https://…/hotel.jpg"></div>
+        <div class="field" style="flex:1;min-width:260px"><label>Фото объекта</label><input type="file" accept="image/*" id="pfPhotoFile"><input type="hidden" id="pfPhoto" value="${esc(p.photo_url || '')}"><div id="pfPhotoPrev" style="margin-top:6px">${p.photo_url ? `<img src="${esc(p.photo_url)}" style="height:54px;border-radius:6px;object-fit:cover">` : '<span class="hint">фото не выбрано</span>'}</div></div>
       </div>
       <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
         <button class="btn btn--primary btn--sm" id="pfSave">${isEdit ? 'Сохранить' : 'Создать объект'}</button>
@@ -1092,7 +1115,7 @@ async function hotelCats(active) {
         <div class="field" style="width:120px"><label>Основных мест</label><input type="number" min="1" class="input" id="cfOcc" value="${c.max_occupancy || 2}"></div>
         <div class="field" style="width:140px"><label>Дефолт-доступность</label><input type="number" min="0" class="input" id="cfDef" value="${c.default_availability || 0}"></div>
         <div class="field" style="width:90px"><label>Активна</label><select class="input" id="cfAct"><option value="1" ${c.is_active !== false ? 'selected' : ''}>Да</option><option value="0" ${c.is_active === false ? 'selected' : ''}>Нет</option></select></div>
-        <div class="field" style="flex:1;min-width:240px"><label>Фото (URL картинки)</label><input class="input" id="cfPhoto" value="${esc(c.photo_url || '')}" placeholder="https://…/room.jpg"></div>
+        <div class="field" style="flex:1;min-width:260px"><label>Фото категории</label><input type="file" accept="image/*" id="cfPhotoFile"><input type="hidden" id="cfPhoto" value="${esc(c.photo_url || '')}"><div id="cfPhotoPrev" style="margin-top:6px">${c.photo_url ? `<img src="${esc(c.photo_url)}" style="height:54px;border-radius:6px;object-fit:cover">` : '<span class="hint">фото не выбрано</span>'}</div></div>
       </div>
       <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
         <button class="btn btn--primary btn--sm" id="cfSave">${isEdit ? 'Сохранить' : 'Создать'}</button>
@@ -1136,6 +1159,8 @@ async function hotelCats(active) {
       </tr>`).join('')}
     </tbody></table>` : `<div class="card-empty">Категорий пока нет. Нажмите «Добавить категорию».</div>`}</div>`;
 
+  pickPhoto('pfPhotoFile', 'pfPhoto', 'pfPhotoPrev');
+  pickPhoto('cfPhotoFile', 'cfPhoto', 'cfPhotoPrev');
   // объект: обработчики
   const padd = $('#propAdd'); if (padd) padd.onclick = () => { propForm = {}; catForm = null; hotelCats(active); };
   const pcancel = $('#pfCancel'); if (pcancel) pcancel.onclick = () => { propForm = null; hotelCats(active); };
