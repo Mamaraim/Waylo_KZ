@@ -48,10 +48,10 @@ async function loadProfile() {
 }
 
 function boot() {
-  // Сессию восстановит onAuthStateChange (событие INITIAL_SESSION): есть
-  // сохранённая сессия — откроется кабинет, иначе — вход. Фолбэк-рендер на
-  // случай, если событие не пришло, чтобы не зависнуть на «Загрузка…».
-  setTimeout(() => { if (!_firstAuth) render(); }, 1500);
+  // Сразу показываем экран (вход). Если есть сохранённая сессия —
+  // onAuthStateChange (INITIAL_SESSION) догрузит кабинет в фоне.
+  // Так страница НИКОГДА не зависает на «Загрузка…».
+  render();
 }
 let _authUid = null;
 db.auth.onAuthStateChange(async (_e, session) => {
@@ -70,18 +70,20 @@ db.auth.onAuthStateChange(async (_e, session) => {
   _authUid = user.id;
   state.user = user;
   state.tab = null; state.openReq = null;
-  try { await db.rpc('accept_pending_invites'); } catch (_e) {}
-  await loadProfile();
-  // нет организации, но есть намерение зарегистрировать компанию → создаём её
-  if (!state.contexts.length) {
-    let intent = pendingOnboard;
-    if (!intent) { try { intent = JSON.parse(localStorage.getItem('waylo_onboard') || 'null'); } catch (_e) { intent = null; } }
-    if (intent && intent.name) {
-      try { await db.rpc('onboard_organization', { p_name: intent.name, p_type: intent.type, p_country: intent.country, p_city: intent.city }); } catch (_e) {}
-      pendingOnboard = null; try { localStorage.removeItem('waylo_onboard'); } catch (_e) {}
-      await loadProfile();
+  try {
+    try { await db.rpc('accept_pending_invites'); } catch (_e) {}
+    await loadProfile();
+    // нет организации, но есть намерение зарегистрировать компанию → создаём её
+    if (!state.contexts.length) {
+      let intent = pendingOnboard;
+      if (!intent) { try { intent = JSON.parse(localStorage.getItem('waylo_onboard') || 'null'); } catch (_e) { intent = null; } }
+      if (intent && intent.name) {
+        try { await db.rpc('onboard_organization', { p_name: intent.name, p_type: intent.type, p_country: intent.country, p_city: intent.city }); } catch (_e) {}
+        pendingOnboard = null; try { localStorage.removeItem('waylo_onboard'); } catch (_e) {}
+        await loadProfile();
+      }
     }
-  }
+  } catch (_e) {}
   render();
 });
 
