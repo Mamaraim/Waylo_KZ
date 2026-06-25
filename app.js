@@ -1074,9 +1074,49 @@ function pickPhoto(fileInputId, hiddenId, prevId) {
   };
 }
 
+let objGallery = [];  // галерея фото объекта (ссылки на файлы в Storage)
+function compressToBlob(file) {
+  return new Promise((resolve, reject) => {
+    const rd = new FileReader();
+    rd.onload = () => { const img = new Image(); img.onload = () => {
+      const max = 1400; let w = img.width, h = img.height;
+      if (w > max || h > max) { const k = Math.min(max / w, max / h); w = Math.round(w * k); h = Math.round(h * k); }
+      const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+      cv.getContext('2d').drawImage(img, 0, 0, w, h);
+      cv.toBlob(b => b ? resolve(b) : reject(new Error('canvas')), 'image/jpeg', 0.78);
+    }; img.onerror = () => reject(new Error('image')); img.src = rd.result; };
+    rd.onerror = () => reject(new Error('read')); rd.readAsDataURL(file);
+  });
+}
+async function uploadToStorage(blob, folder) {
+  const id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + '-' + Math.random().toString(16).slice(2));
+  const path = folder + '/' + id + '.jpg';
+  const { error } = await db.storage.from('photos').upload(path, blob, { contentType: 'image/jpeg', upsert: false });
+  if (error) throw error;
+  return db.storage.from('photos').getPublicUrl(path).data.publicUrl;
+}
+function renderObjGallery() {
+  const g = document.getElementById('pfGallery'); if (!g) return;
+  g.innerHTML = objGallery.length ? objGallery.map((u, i) => `<div style="position:relative;width:78px;height:58px"><img src="${esc(u)}" style="width:100%;height:100%;object-fit:cover;border-radius:6px;border:1px solid var(--line)">${i === 0 ? '<span style="position:absolute;bottom:2px;left:2px;font-size:9px;background:var(--accent);color:#fff;border-radius:4px;padding:0 4px">обложка</span>' : ''}<button type="button" class="pfImgDel" data-i="${i}" style="position:absolute;top:-7px;right:-7px;width:18px;height:18px;border-radius:50%;border:none;background:var(--red);color:#fff;cursor:pointer;font-size:11px;line-height:1">×</button></div>`).join('') : '<span class="hint">фото не добавлены</span>';
+  g.querySelectorAll('.pfImgDel').forEach(b => b.onclick = () => { objGallery.splice(+b.dataset.i, 1); renderObjGallery(); });
+}
+function bindObjGallery(active) {
+  const fi = document.getElementById('pfPhotoFiles'); if (!fi) return;
+  fi.onchange = async () => {
+    const files = [...(fi.files || [])];
+    const msg = document.getElementById('pfMsg');
+    for (const f of files) {
+      if (objGallery.length >= 20) { if (msg) msg.innerHTML = '<span style="color:var(--amber)">Максимум 20 фото на объект.</span>'; break; }
+      try { const blob = await compressToBlob(f); const url = await uploadToStorage(blob, 'property/' + (active.orgId || 'x')); objGallery.push(url); renderObjGallery(); }
+      catch (e) { if (msg) msg.innerHTML = `<span style="color:var(--red)">Загрузка не удалась: ${esc((e && e.message) || e)}. Проверьте, что применена миграция 0029 (бакет 'photos').</span>`; }
+    }
+    fi.value = '';
+  };
+}
+
 async function hotelCats(active) {
   const main = $('#main'); if (!main) return;
-  const { data: props } = await db.from('property').select('id,name,city,kind,star_category,is_active').eq('org_id', active.orgId).order('name');
+  const { data: props } = await db.from('property').select('id,name,city,kind,star_category,is_active,photo_url,photos').eq('org_id', active.orgId).order('name');
   const propList = props || [];
   const pById = Object.fromEntries(propList.map(p => [p.id, p]));
   const ids = propList.map(p => p.id);
@@ -1095,7 +1135,7 @@ async function hotelCats(active) {
         <div class="field" style="width:170px"><label>Тип</label><select class="input" id="pfKind"><option value="city" ${p.kind !== 'resort' ? 'selected' : ''}>Городской отель</option><option value="resort" ${p.kind === 'resort' ? 'selected' : ''}>Резорт</option></select></div>
         <div class="field" style="width:90px"><label>Звёзды</label><input type="number" min="1" max="5" class="input" id="pfStar" value="${p.star_category || 4}"></div>
         <div class="field" style="width:90px"><label>Активен</label><select class="input" id="pfAct"><option value="1" ${p.is_active !== false ? 'selected' : ''}>Да</option><option value="0" ${p.is_active === false ? 'selected' : ''}>Нет</option></select></div>
-        <div class="field" style="flex:1;min-width:260px"><label>Фото объекта</label><input type="file" accept="image/*" id="pfPhotoFile"><input type="hidden" id="pfPhoto" value="${esc(p.photo_url || '')}"><div id="pfPhotoPrev" style="margin-top:6px">${p.photo_url ? `<img src="${esc(p.photo_url)}" style="height:54px;border-radius:6px;object-fit:cover">` : '<span class="hint">фото не выбрано</span>'}</div></div>
+        <div class="field" style="flex:1;min-width:320px"><label>Фото объекта (до 20, с диска)</label><input type="file" accept="image/*" multiple id="pfPhotoFiles"><div id="pfGallery" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px"></div></div>
       </div>
       <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
         <button class="btn btn--primary btn--sm" id="pfSave">${isEdit ? 'Сохранить' : 'Создать объект'}</button>
@@ -1161,7 +1201,11 @@ async function hotelCats(active) {
       </tr>`).join('')}
     </tbody></table>` : `<div class="card-empty">Категорий пока нет. Нажмите «Добавить категорию».</div>`}</div>`;
 
-  pickPhoto('pfPhotoFile', 'pfPhoto', 'pfPhotoPrev');
+  if (propForm) {
+    objGallery = (propForm.photos && propForm.photos.length) ? propForm.photos.slice() : (propForm.photo_url ? [propForm.photo_url] : []);
+    renderObjGallery();
+    bindObjGallery(active);
+  }
   pickPhoto('cfPhotoFile', 'cfPhoto', 'cfPhotoPrev');
   // объект: обработчики
   const padd = $('#propAdd'); if (padd) padd.onclick = () => { propForm = {}; catForm = null; hotelCats(active); };
@@ -1176,7 +1220,8 @@ async function hotelCats(active) {
       kind: $('#pfKind').value,
       star_category: Math.min(5, Math.max(1, parseInt($('#pfStar').value || '4', 10))),
       is_active: $('#pfAct').value === '1',
-      photo_url: ($('#pfPhoto').value || '').trim() || null,
+      photo_url: objGallery[0] || null,
+      photos: objGallery.slice(),
     };
     let error;
     if (propForm.id) ({ error } = await db.from('property').update(payload).eq('id', propForm.id));
