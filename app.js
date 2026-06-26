@@ -1,4 +1,4 @@
-/* waylo build 2026-06-26 v6 · delete object (×) + hover-tooltips + auth-fix */
+/* waylo build 2026-06-26 v7 · catalog shows all uploaded objects (price optional) */
 /* ===========================================================================
    НАСТРОЙКА: вставь свой anon-ключ (Supabase → Settings → API → anon public).
    anon-ключ публичный и безопасный для клиента — доступ к данным режет RLS.
@@ -600,13 +600,23 @@ async function dmcCatalog() {
   const galByProp = {};
   (types || []).forEach(t => { const ph = (t.photos && t.photos.length) ? t.photos : (t.photo_url ? [t.photo_url] : []); if (ph.length) (galByProp[t.property_id] = galByProp[t.property_id] || []).push(...ph); });
   const rateByRt = {}; (rates || []).forEach(r => { if (!rateByRt[r.room_type_id]) rateByRt[r.room_type_id] = r; });
-  // группируем тарифы по объекту: мин. цена + число категорий
+  // группируем по объекту ВСЕ категории номеров (с ценой и без). Объект виден в
+  // каталоге сразу после добавления; цена показывается, если её задала платформа.
   const byProp = {};
-  (rates || []).forEach(r => { const t = tById[r.room_type_id]; if (!t) return; const pid = t.property_id; const e = byProp[pid] || { min: Infinity, cats: 0, cur: r.currency, photo: null }; e.min = Math.min(e.min, Number(r.sell_price) || 0); e.cats += 1; if (!e.photo && t.photo_url) e.photo = t.photo_url; byProp[pid] = e; });
-  const cards = (props || []).filter(p => byProp[p.id]).map(p => ({ ...p, min: byProp[p.id].min, cats: byProp[p.id].cats, cur: byProp[p.id].cur, photo: byProp[p.id].photo, gallery: (function(){ const o = (p.photos && p.photos.length) ? p.photos.slice() : (p.photo_url ? [p.photo_url] : []); const all = o.concat(galByProp[p.id] || []); return all.length ? all : (byProp[p.id].photo ? [byProp[p.id].photo] : []); })() }))
+  (types || []).forEach(t => {
+    const pid = t.property_id;
+    const e = byProp[pid] || { min: Infinity, cats: 0, priced: 0, cur: null, photo: null };
+    e.cats += 1;
+    if (!e.photo && t.photo_url) e.photo = t.photo_url;
+    const r = rateByRt[t.id];
+    if (r) { e.priced += 1; const sp = Number(r.sell_price) || 0; if (sp < e.min) e.min = sp; if (!e.cur) e.cur = r.currency; }
+    byProp[pid] = e;
+  });
+  const cards = (props || []).filter(p => byProp[p.id]).map(p => { const b = byProp[p.id]; return { ...p, min: b.priced ? b.min : null, cats: b.cats, priced: b.priced, cur: b.cur || 'USD', photo: b.photo, gallery: (function(){ const o = (p.photos && p.photos.length) ? p.photos.slice() : (p.photo_url ? [p.photo_url] : []); const all = o.concat(galByProp[p.id] || []); return all.length ? all : (b.photo ? [b.photo] : []); })() }; })
     .sort((a, b) => (a.city || '').localeCompare(b.city || '', 'ru'));
   const vById = Object.fromEntries((vcs || []).map(v => [v.id, v]));
-  const trows = (trates || []).map(r => { const v = vById[r.vehicle_class_id]; return v ? { ...r, vname: v.name, pax: `${v.pax_min}–${v.pax_max}` } : null; }).filter(Boolean);
+  const trateByVc = {}; (trates || []).forEach(r => { if (!trateByVc[r.vehicle_class_id]) trateByVc[r.vehicle_class_id] = r; });
+  const trows = (vcs || []).map(v => { const r = trateByVc[v.id]; return { vname: v.name, pax: `${v.pax_min}–${v.pax_max}`, basis: r ? r.basis : null, price: r ? r.sell_price_per_unit : null, currency: r ? r.currency : 'USD' }; });
   const KIND = { city: 'Отель', resort: 'Резорт' };
 
   main.innerHTML = `
@@ -625,16 +635,16 @@ async function dmcCatalog() {
             <div style="font-weight:600;font-size:15px">${esc(c.name)}</div>
             <div class="hint">${esc(c.city || '')}</div>
             <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-top:14px;padding-top:13px;border-top:1px solid var(--line-2)">
-              <div><div style="font-size:11px;color:var(--muted)">от · за ночь</div><div class="price" style="font-size:18px">${money(c.min, c.cur)}</div></div>
+              <div><div style="font-size:11px;color:var(--muted)">${c.min != null ? 'от · за ночь' : '\u00a0'}</div><div class="price" style="font-size:18px">${c.min != null ? money(c.min, c.cur) : '<span class="hint" style="font-size:13px;font-weight:500">Цена уточняется</span>'}</div></div>
               <div class="hint" style="color:var(--accent-ink);font-weight:600">${c.cats} категор.</div>
             </div>
           </div>
-        </div>`).join('') : `<div class="card" style="grid-column:1/-1"><div class="card-empty">Пока нет объектов с ценой. Платформа задаёт цены во вкладке «Цены».</div></div>`}
+        </div>`).join('') : `<div class="card" style="grid-column:1/-1"><div class="card-empty">Пока нет объектов. Они появятся здесь сразу после того, как поставщик добавит объект и категории номеров.</div></div>`}
     </div>
     <div class="card" style="margin-top:16px"><div class="card-head">Трансферы</div>
     ${trows.length ? `<table><thead><tr><th>Класс машины</th><th>Pax</th><th>Тариф</th><th style="text-align:right">Цена</th></tr></thead><tbody>
-      ${trows.map(r => `<tr><td><b>${esc(r.vname)}</b></td><td class="mono">${esc(r.pax)}</td><td class="hint">${r.basis === 'per_transfer' ? 'за трансфер' : 'за день'}</td><td class="price" style="text-align:right">${money(r.sell_price_per_unit, r.currency)}</td></tr>`).join('')}
-    </tbody></table>` : `<div class="card-empty">Пока нет трансферов.</div>`}</div>`;
+      ${trows.map(r => `<tr><td><b>${esc(r.vname)}</b></td><td class="mono">${esc(r.pax)}</td><td class="hint">${r.basis == null ? '—' : (r.basis === 'per_transfer' ? 'за трансфер' : 'за день')}</td><td class="price" style="text-align:right">${r.price != null ? money(r.price, r.currency) : '<span class="hint" style="font-weight:500">уточняется</span>'}</td></tr>`).join('')}
+    </tbody></table>` : `<div class="card-empty">Пока нет классов транспорта.</div>`}</div>`;
 
   const search = $('#catSearch');
   if (search) search.oninput = () => {
