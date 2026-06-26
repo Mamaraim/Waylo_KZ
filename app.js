@@ -2509,7 +2509,7 @@ async function loadCalcCat() {
 }
 
 function newCalc() {
-  return { profit: 250, stops: [], trans: [], misc: [{ name: 'Вода', sum: 0 }, { name: 'Портеры', sum: 0 }] };
+  return { profit: 0, stops: [], trans: [], misc: [{ name: 'Вода', sum: 0 }, { name: 'Портеры', sum: 0 }] };
 }
 
 // транспорт — по одному городу маршрута (дни = ночи); значения сохраняем по городу
