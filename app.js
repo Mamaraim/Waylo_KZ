@@ -1,4 +1,4 @@
-/* waylo build 2026-06-26 v2 · gallery cat+obj (10 фото, DMC просмотр) */
+/* waylo build 2026-06-26 v3 · auth-fix: deterministic login, no-hang, timeouts */
 /* ===========================================================================
    НАСТРОЙКА: вставь свой anon-ключ (Supabase → Settings → API → anon public).
    anon-ключ публичный и безопасный для клиента — доступ к данным режет RLS.
@@ -49,43 +49,80 @@ async function loadProfile() {
 }
 
 function boot() {
-  // Сразу показываем экран (вход). Если есть сохранённая сессия —
-  // onAuthStateChange (INITIAL_SESSION) догрузит кабинет в фоне.
-  // Так страница НИКОГДА не зависает на «Загрузка…».
+  // Показываем экран сразу. Сохранённую сессию подхватит onAuthStateChange
+  // (событие INITIAL_SESSION) и догрузит кабинет. Страница не виснет на «Загрузка…».
   render();
 }
-let _authUid = null;
-db.auth.onAuthStateChange(async (_e, session) => {
-  _firstAuth = true;
-  const user = session?.user || null;
-  if (!user) {                                  // выход
-    _authUid = null; pendingOnboard = null;
-    state.user = null; state.contexts = []; state.isPlatform = false;
-    state.activeKey = null; state.tab = null; state.openReq = null;
-    render(); return;
-  }
-  // Тот же пользователь уже загружен → это повторное событие (фокус вкладки,
-  // обновление токена, INITIAL_SESSION). Игнорируем, чтобы НЕ обнулять activeKey
-  // и не «выкидывать» из выбранного кабинета между перерисовками контента.
+
+// Жёсткий таймаут на любой сетевой/auth-вызов. Гарантия: UI НИКОГДА не зависнет
+// навсегда — вместо вечного «Входим…» покажем ошибку и вернём рабочую форму.
+function withTimeout(p, ms, label) {
+  return Promise.race([
+    Promise.resolve(p),
+    new Promise((_, rej) => setTimeout(
+      () => rej(new Error('Превышено время ожидания: ' + label + '. Проверьте соединение и попробуйте снова.')), ms)),
+  ]);
+}
+function readOnboard() {
+  if (pendingOnboard) return pendingOnboard;
+  try { return JSON.parse(localStorage.getItem('waylo_onboard') || 'null'); } catch (_e) { return null; }
+}
+function clearOnboard() { pendingOnboard = null; try { localStorage.removeItem('waylo_onboard'); } catch (_e) {} }
+
+let _authUid = null;     // id уже загруженного пользователя (защита от задвоения)
+let _entering = false;   // идёт вход прямо сейчас (защита от гонок)
+let _loginError = null;  // текст ошибки для экрана входа
+
+// Единая идемпотентная точка входа в кабинет. Вызывается НАПРЯМУЮ из обработчика
+// кнопки (детерминированно, по результату signInWithPassword) и из
+// onAuthStateChange (восстановление сессии при перезагрузке и возврат после Google).
+// Защиты _authUid/_entering исключают двойную работу и гонки между этими путями.
+async function enterApp(user) {
+  if (!user) return;
   if (_authUid === user.id && state.contexts.length) { state.user = user; return; }
-  _authUid = user.id;
-  state.user = user;
-  state.tab = null; state.openReq = null;
+  if (_entering) return;
+  _entering = true; _firstAuth = true;
+  state.user = user; state.tab = null; state.openReq = null;
   try {
-    try { await db.rpc('accept_pending_invites'); } catch (_e) {}
-    await loadProfile();
+    try { await withTimeout(db.rpc('accept_pending_invites'), 8000, 'приглашения'); } catch (_e) {}
+    await withTimeout(loadProfile(), 12000, 'загрузка профиля');
     // нет организации, но есть намерение зарегистрировать компанию → создаём её
     if (!state.contexts.length) {
-      let intent = pendingOnboard;
-      if (!intent) { try { intent = JSON.parse(localStorage.getItem('waylo_onboard') || 'null'); } catch (_e) { intent = null; } }
+      const intent = readOnboard();
       if (intent && intent.name) {
-        try { await db.rpc('onboard_organization', { p_name: intent.name, p_type: intent.type, p_country: intent.country, p_city: intent.city }); } catch (_e) {}
-        pendingOnboard = null; try { localStorage.removeItem('waylo_onboard'); } catch (_e) {}
-        await loadProfile();
+        try { await withTimeout(db.rpc('onboard_organization', { p_name: intent.name, p_type: intent.type, p_country: intent.country, p_city: intent.city }), 12000, 'создание компании'); } catch (_e) {}
+        clearOnboard();
+        await withTimeout(loadProfile(), 12000, 'загрузка профиля');
       }
     }
-  } catch (_e) {}
+    _authUid = user.id; _loginError = null;
+  } catch (e) {
+    // Профиль не загрузился — НЕ виснем: сбрасываем и показываем форму с ошибкой.
+    _authUid = null; state.user = null; state.contexts = []; state.isPlatform = false;
+    _loginError = (e && e.message) || String(e);
+  } finally {
+    _entering = false;
+  }
   render();
+}
+
+db.auth.onAuthStateChange((_e, session) => {
+  // ВАЖНО: тело откладываем через setTimeout(0), чтобы выйти из контекста
+  // блокировки GoTrue. Вызовы db.* прямо внутри колбэка onAuthStateChange — главная
+  // фундаментальная причина «вечных» зависаний supabase-js; так deadlock исключён.
+  setTimeout(() => {
+    const user = session?.user || null;
+    if (!user) {                                  // выход / нет сессии
+      _authUid = null; clearOnboard();
+      state.user = null; state.contexts = []; state.isPlatform = false;
+      state.activeKey = null; state.tab = null; state.openReq = null;
+      _firstAuth = true; render(); return;
+    }
+    // INITIAL_SESSION (перезагрузка) или SIGNED_IN (возврат после Google).
+    // Интерактивный вход по паролю уже вызвал enterApp напрямую — здесь сработает
+    // защита _authUid и повторной работы не будет.
+    enterApp(user);
+  }, 0);
 });
 
 function render() { state.user ? renderShell() : renderLogin(); }
@@ -109,7 +146,7 @@ function renderLogin() {
       <div class="seg-sub" id="segSub">${esc(seg.sub)}</div>
       <div class="field"><label>Почта</label><input type="email" id="email" autocomplete="username" placeholder="you@company.com" value="${seg.email}" required></div>
       <div class="field"><label>Пароль</label><input type="password" id="password" autocomplete="current-password" required></div>
-      <div id="loginErr"></div>
+      <div id="loginErr">${_loginError ? `<div class="notice notice--err">${esc(_loginError)}</div>` : ''}</div>
       <button class="btn btn--primary" id="loginBtn">Войти</button>
       <button type="button" class="btn btn--ghost" id="googleBtn" style="width:100%;justify-content:center;display:flex;margin-top:8px">Войти через Google</button>
       <div class="login-creds">Тест (пароль <code>waylo-test-pass</code>): <code id="segCred">${esc(seg.email)}</code></div>
@@ -128,9 +165,17 @@ function renderLogin() {
   const gb = $('#googleBtn'); if (gb) gb.onclick = () => googleSignIn(null);
   $('#loginForm').onsubmit = async (e) => {
     e.preventDefault();
+    _loginError = null;
     const btn = $('#loginBtn'); btn.disabled = true; btn.textContent = 'Входим…';
-    const { error } = await db.auth.signInWithPassword({ email:$('#email').value, password:$('#password').value });
-    if (error) { $('#loginErr').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; btn.disabled = false; btn.textContent = 'Войти'; }
+    try {
+      const { data, error } = await withTimeout(
+        db.auth.signInWithPassword({ email: $('#email').value, password: $('#password').value }), 15000, 'вход');
+      if (error) throw error;
+      await enterApp(data.user);   // детерминированный переход в кабинет, без ожидания события
+    } catch (err) {
+      _loginError = (err && err.message) || String(err);
+      render();                    // вернуть форму с ошибкой и рабочей кнопкой
+    }
   };
 }
 
@@ -186,16 +231,24 @@ function renderSignup() {
     const intent = { name, type, country, city };
     pendingOnboard = intent;
     try { localStorage.setItem('waylo_onboard', JSON.stringify(intent)); } catch (_e) {}
-    const { data, error } = await db.auth.signUp({ email, password: p1 });
-    if (error) { pendingOnboard = null; try { localStorage.removeItem('waylo_onboard'); } catch (_e) {} $('#suErr').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; btn.disabled = false; btn.textContent = 'Зарегистрироваться'; return; }
-    if (data && data.session) {
-      const { error: e2 } = await db.auth.signInWithPassword({ email, password: p1 });
-      if (e2) { pendingOnboard = null; $('#suErr').innerHTML = `<div class="notice notice--err">${esc(e2.message)}</div>`; btn.disabled = false; btn.textContent = 'Зарегистрироваться'; }
-    } else {
-      pendingOnboard = null;
-      $('#suErr').innerHTML = `<div class="notice">Аккаунт создан. Подтвердите почту по ссылке из письма, затем войдите.</div>`;
+    try {
+      const { data, error } = await withTimeout(db.auth.signUp({ email, password: p1 }), 15000, 'регистрация');
+      if (error) throw error;
+      if (data && data.session) {
+        const { data: d2, error: e2 } = await withTimeout(
+          db.auth.signInWithPassword({ email, password: p1 }), 15000, 'вход');
+        if (e2) throw e2;
+        await enterApp(d2.user);   // создаст компанию (pendingOnboard) и откроет кабинет
+      } else {
+        clearOnboard();
+        $('#suErr').innerHTML = `<div class="notice">Аккаунт создан. Подтвердите почту по ссылке из письма, затем войдите.</div>`;
+        btn.disabled = false; btn.textContent = 'Зарегистрироваться';
+        loginMode = 'signin';
+      }
+    } catch (err) {
+      clearOnboard();
+      $('#suErr').innerHTML = `<div class="notice notice--err">${esc((err && err.message) || String(err))}</div>`;
       btn.disabled = false; btn.textContent = 'Зарегистрироваться';
-      loginMode = 'signin';
     }
   };
 }
