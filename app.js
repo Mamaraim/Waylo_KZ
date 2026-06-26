@@ -1,4 +1,4 @@
-/* waylo build 2026-06-26 v4 · coach-hints (Grok via Edge Fn) + auth-fix */
+/* waylo build 2026-06-26 v5 · hover-tooltips at fields (Grok) + auth-fix */
 /* ===========================================================================
    НАСТРОЙКА: вставь свой anon-ключ (Supabase → Settings → API → anon public).
    anon-ключ публичный и безопасный для клиента — доступ к данным режет RLS.
@@ -163,7 +163,6 @@ function renderLogin() {
   $('#opLink').onclick = () => { $('#email').value = 'platform@waylo.test'; $('#segCred').textContent = 'platform@waylo.test'; };
   $('#toSignup').onclick = () => { loginMode = 'signup'; renderLogin(); };
   const gb = $('#googleBtn'); if (gb) gb.onclick = () => googleSignIn(null);
-  coach('login');
   $('#loginForm').onsubmit = async (e) => {
     e.preventDefault();
     _loginError = null;
@@ -211,7 +210,6 @@ function renderSignup() {
       <div class="op-link" style="margin-top:8px"><a id="toSignin">← Уже есть аккаунт? Войти</a></div>
     </form></div>`;
   $('#toSignin').onclick = () => { loginMode = 'signin'; renderLogin(); };
-  coach('signup');
   const sug = $('#suGoogleBtn'); if (sug) sug.onclick = () => {
     const nm = ($('#suName').value || '').trim();
     if (!nm) { $('#suErr').innerHTML = `<div class="notice notice--err">Для регистрации через Google укажите название компании.</div>`; return; }
@@ -314,66 +312,91 @@ function navShell(kicker, tabs) {
       try { localStorage.setItem('waylo_hints', _hintsOn ? 'on' : 'off'); } catch (_e) {}
       ht.classList.toggle('off', !_hintsOn);
       ht.querySelector('span').textContent = _hintsOn ? 'Подсказки' : 'Подсказки выкл';
-      if (_hintsOn) { _coachSeen.delete(coachKey(state.tab)); coach(state.tab); } else clearToasts();
+      if (!_hintsOn) hideTip();
     };
   }
   const main = document.getElementById('main');
   if (main) main.innerHTML = `<div class="center-state">Загрузка…</div>`;
-  coach(state.tab);
 }
 
-/* ── Coach: всплывающие подсказки на каждом шаге ─────────────────────────────
-   База показывается мгновенно (оффлайн), затем Grok (через Edge Function
-   waylo-hints) может улучшить текст. Если AI недоступен — остаётся база.
-   Каждая подсказка появляется один раз за сессию на экран. */
+/* ── Coach: контекстные подсказки у поля при наведении мыши ──────────────────
+   Подсказка всплывает РЯДОМ с полем/кнопкой, подсвечивает элемент, фон светло-серый.
+   Тексты привязываются к полям автоматически по подписи (label) — на любом экране.
+   Базовый текст показывается мгновенно; Grok (Edge Function waylo-hints) может его
+   улучшить (помечается «AI»). Кнопка «💡 Подсказки» в шапке включает/выключает. */
 let _hintsOn = (function () { try { return localStorage.getItem('waylo_hints') !== 'off'; } catch (_e) { return true; } })();
-const _coachSeen = new Set();
-let _toastSeq = 0;
+const _hintCache = {};
+let _tipEl = null, _tipFor = null;
 
-const HINTS = {
-  'guest/signup': { title: 'Регистрация компании', text: 'Выберите тип компании — создадим кабинет, вы станете суперадмином. Если вас уже пригласили в существующую компанию, доступ выдастся автоматически по вашему email (название можно не трогать).' },
-  'guest/login':  { title: 'Вход в Waylo', text: 'Выберите, кто вы (турагентство, отель или перевозчик), и войдите по почте. Впервые здесь — нажмите «Регистрация компании».' },
-
-  'DMC/dash':     { title: 'С чего начать', text: 'Это сводка по вашим турам и статусам. Чтобы собрать новый тур, откройте «Каталог» и добавьте отели и трансферы.' },
-  'DMC/catalog':  { title: 'Каталог поставщиков', text: 'Отели и трансферы с ценой к продаже. Кликните по фото объекта — откроется галерея. Себестоимость поставщика скрыта.' },
-  'DMC/calc':     { title: 'Калькулятор тура', text: 'Укажите даты, номера и трансферы — справа считается цена к продаже. При оформлении система захолдирует места у поставщика, чтобы их не заняли.' },
-  'DMC/requests': { title: 'Ваши туры', text: 'Собранные заявки и их статусы. Откройте тур, чтобы увидеть состав, оплату и ваучер.' },
-  'DMC/pay':      { title: 'Оплаты', text: 'Счета по заявкам. Важно: поставщик подтвердит бронь только после оплаты — оплатите здесь и приложите подтверждение.' },
-  'DMC/finance':  { title: 'Финансы', text: 'История платежей и баланс по вашим турам.' },
-
-  'HOTEL/cats':     { title: 'Объекты и категории', text: 'Сначала заведите объект (здание/резорт), затем добавьте категории номеров с вместимостью и дефолт-доступностью. Фото — до 10 с диска. Цены задаёт платформа отдельно.' },
-  'HOTEL/avail':    { title: 'Доступность', text: 'Сколько номеров каждой категории свободно по датам. Пусто = берётся дефолт-доступность категории. Меняйте остаток на конкретные дни, чтобы не было овербукинга.' },
-  'HOTEL/bookings': { title: 'Шахматка броней', text: 'Брони и временные холды по дням — видно реальную загрузку. Так вы избегаете двойных продаж одного номера.' },
-  'HOTEL/confirm':  { title: 'Подтверждения', text: 'Заявки от DMC. Подтвердить можно только после оплаты — об этом скажет плашка. После подтверждения DMC получает ваучер.' },
-  'HOTEL/finance':  { title: 'Финансы', text: 'Начисления и взаиморасчёты с платформой по подтверждённым заявкам.' },
-  'HOTEL/team':     { title: 'Команда', text: 'Пригласите сотрудников по email. Суперадмин выдаёт права админа. Каждый входит под своей почтой — общий аккаунт не нужен.' },
-
-  'TRANSPORT/fleet':   { title: 'Автопарк', text: 'Добавьте классы машин (седан, минивэн, автобус…) с вместимостью pax. Тарифы задаёт платформа.' },
-  'TRANSPORT/avail':   { title: 'Доступность транспорта', text: 'Укажите, сколько машин каждого класса свободно по датам и городам — иначе класс не получится забронировать.' },
-  'TRANSPORT/confirm': { title: 'Подтверждения', text: 'Заявки на трансферы от DMC. Подтверждайте после оплаты.' },
-
-  'platform/orgs':     { title: 'Организации', text: 'Все компании контура. Здесь онбордите участников и управляете доступом.' },
-  'platform/pricing':  { title: 'Цены', text: 'Задайте цену к продаже для категорий и трансферов. Без цены объект не виден в каталоге DMC.' },
-  'platform/payments': { title: 'Оплаты', text: 'Входящие платежи DMC. Подтверждение брони поставщиком открывается только после оплаты.' },
-  'platform/recon':    { title: 'Сверка', text: 'Сверяйте начисления поставщикам и поступления от DMC.' },
-  'platform/log':      { title: 'Журнал', text: 'Неизменяемая история событий контура — кто и что менял.' },
+const LABEL_HINTS = {
+  // — регистрация / вход —
+  'Кто вы?': 'Выберите сегмент входа — подставит тестовую почту и описание роли.',
+  'Тип компании': 'Кто вы: турагентство/DMC (покупатель), отель/резорт или транспорт (поставщики). От этого зависит набор экранов кабинета.',
+  'Название компании': 'Официальное название — его увидят партнёры. Например: Silk Road DMC.',
+  'Страна': 'Код страны: KZ — Казахстан, UZ — Узбекистан.',
+  'Город': 'Город, где вы работаете. Для отелей и транспорта влияет на выдачу в каталоге и трансферах.',
+  'Город / локация': 'Город или курортная зона объекта (например, Чарвак).',
+  'Почта': 'Рабочая почта — это ваш логин. Удобно использовать Gmail (можно входить кнопкой «Войти через Google»).',
+  'Пароль': 'Минимум 6 символов.',
+  'Повтор пароля': 'Повторите пароль в точности — чтобы исключить опечатку.',
+  'Email суперадмина': 'Почта, на которую выдаётся доступ суперадмина — он управляет компанией и командой.',
+  'Email сотрудника': 'Почта сотрудника, которого приглашаете. Он войдёт под ней; права выдаёт суперадмин.',
+  'Роль': 'Уровень доступа: админ меняет данные, суперадмин — ещё и управляет командой.',
+  // — отель: объект и категории —
+  'Название объекта': 'Название здания или резорта (например, Tent House).',
+  'Тип': 'Городской отель или резорт — влияет на ярлык в каталоге.',
+  'Звёзды': 'Звёздность объекта, 1–5.',
+  'Объект': 'Здание/резорт, к которому относится категория. Сначала заведите объект, потом категории номеров.',
+  'Название категории': 'Тип номера: Single, Double, Suite и т.п.',
+  'Сокращённое': 'Короткий код категории для шахматки и расчётов (напр. SGL).',
+  'Основных мест': 'Сколько гостей размещается на основных местах (без доп. кроватей).',
+  'Дефолт-доступность': 'Сколько таких номеров доступно по умолчанию, если на конкретную дату нет отдельной настройки.',
+  'Активна': 'Выключите, чтобы временно скрыть позицию из продажи, не удаляя её.',
+  'Активен': 'Выключите, чтобы временно скрыть позицию из продажи, не удаляя её.',
+  'Фото категории (до 10, с диска)': 'Загрузите до 10 фото с компьютера. Первое станет обложкой. DMC увидит их в галерее каталога.',
+  'Фото объекта (до 20, с диска)': 'До 20 фото объекта с диска. Первое — обложка карточки в каталоге.',
+  // — доступность / даты —
+  'Дата': 'Дата, на которую задаёте остаток мест.',
+  'С даты': 'Начало периода, на который задаёте доступность.',
+  'По дату': 'Конец периода (включительно).',
+  'По дату (вкл.)': 'Конец периода включительно.',
+  'Категория': 'Категория номера, для которой меняете доступность.',
+  'Номеров': 'Сколько номеров свободно в этот период. 0 — продаж нет.',
+  'Машин': 'Сколько машин этого класса свободно в этот период. 0 — недоступно.',
+  'Кол-во': 'Доступное количество единиц на выбранный период.',
+  // — транспорт —
+  'Класс машины': 'Класс ТС: седан, минивэн, автобус и т.д. — по вместимости pax.',
+  'Города (через запятую)': 'Города обслуживания класса, например: Ташкент, Самарканд.',
+  // — калькулятор тура —
+  'Заезд': 'Дата заезда — по ней считаются ночи и проверяется доступность.',
+  'Выезд': 'Дата выезда. Число ночей = выезд минус заезд.',
+  'Номер': 'Выберите категорию номера из каталога, чтобы добавить в тур.',
+  // — платформа: цены —
+  'Цена нетто (видит DMC)': 'Цена к продаже, которую видит DMC. Себестоимость поставщика остаётся скрытой.',
+  'SGL-надбавка': 'Доплата за одноместное размещение.',
+  'Retail (опц.)': 'Рекомендованная розничная цена (необязательно).',
+  'Валюта': 'Валюта цены (например, USD).',
+  'Ваша цена, $ (за трансфер)': 'Цена к продаже за один трансфер.',
+  'Тип сбора': 'Тариф считается за трансфер или за день.',
+  'Действует с': 'Дата, с которой действует эта цена.',
 };
 
-function coachRole() {
-  const active = state.contexts.find(c => c.key === state.activeKey);
-  if (!active) return 'guest';
-  return active.kind === 'platform' ? 'platform' : (active.orgType || 'guest');
+// Навешиваем подсказки на поля по тексту их подписи — авто, на любом экране.
+function applyFieldHints(root) {
+  (root || document).querySelectorAll('.field').forEach(f => {
+    const lab = f.querySelector('label'); if (!lab) return;
+    const txt = (lab.textContent || '').trim();
+    const hint = LABEL_HINTS[txt]; if (!hint) return;
+    const tgt = f.querySelector('input,select,textarea') || f;
+    if (tgt && !tgt.getAttribute('data-hint')) { tgt.setAttribute('data-hint', hint); tgt.setAttribute('data-hintkey', txt); }
+  });
 }
-function coachKey(screen) { return coachRole() + '/' + screen; }
-
-function coach(screen) {
-  if (!_hintsOn || !screen) return;
-  const key = coachKey(screen);
-  const base = HINTS[key];
-  if (!base || _coachSeen.has(key)) return;
-  _coachSeen.add(key);
-  const id = showToast(base.title, base.text, false);
-  grokHint(coachRole(), screen, base.text).then(h => { if (h && _hintsOn) updateToast(id, base.title, h, true); });
+let _hintObs = null;
+function startHintObserver() {
+  if (_hintObs) return;
+  _hintObs = new MutationObserver(() => { clearTimeout(_hintObs._t); _hintObs._t = setTimeout(() => applyFieldHints(document), 80); });
+  _hintObs.observe(document.body, { childList: true, subtree: true });
+  applyFieldHints(document);
 }
 
 async function grokHint(role, screen, base) {
@@ -389,46 +412,67 @@ async function grokHint(role, screen, base) {
   } catch (_e) { return null; }
 }
 
-function ensureCoachUI() {
-  if (document.getElementById('coachStack')) return;
+function ensureTipUI() {
+  if (_tipEl) return;
   const st = document.createElement('style');
   st.textContent = `
-  #coachStack{position:fixed;right:18px;bottom:18px;z-index:9999;display:flex;flex-direction:column;gap:10px;max-width:340px}
-  .coach-toast{background:var(--surface,#fff);border:1px solid var(--line,#e6e9e8);border-left:4px solid var(--accent,#0f766e);border-radius:12px;box-shadow:0 8px 28px rgba(20,33,29,.16);padding:13px 14px;animation:coachIn .25s ease;font-family:var(--sans,system-ui)}
-  @keyframes coachIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
-  .coach-toast .ct-head{display:flex;align-items:center;gap:7px;font-weight:600;font-size:13.5px;color:var(--ink,#17211d);margin-bottom:4px}
-  .coach-toast .ct-ai{margin-left:auto;font-size:9.5px;font-weight:700;letter-spacing:.04em;color:var(--accent-ink,#0a544e);background:var(--accent-soft,#e3f1ee);border-radius:6px;padding:1px 6px}
-  .coach-toast .ct-x{margin-left:6px;cursor:pointer;border:none;background:none;color:var(--muted,#76847e);font-size:16px;line-height:1;padding:0}
-  .coach-toast .ct-body{font-size:12.8px;line-height:1.5;color:var(--ink-2,#3c4a44)}
+  #coachTip{position:fixed;z-index:10000;max-width:280px;background:#f4f5f5;border:1px solid #e0e3e2;border-radius:10px;
+    box-shadow:0 6px 22px rgba(20,33,29,.14);padding:10px 12px;font-family:var(--sans,system-ui);font-size:12.6px;
+    line-height:1.5;color:#2b3a34;display:none;pointer-events:none}
+  #coachTip .tt-h{font-weight:700;font-size:11px;letter-spacing:.02em;color:#0a544e;margin-bottom:3px;display:flex;align-items:center;gap:5px}
+  #coachTip .tt-ai{font-size:9px;font-weight:700;background:#e3f1ee;color:#0a544e;border-radius:5px;padding:1px 5px;margin-left:auto}
+  .coach-hl{box-shadow:0 0 0 3px rgba(15,118,110,.20)!important;border-radius:9px!important;transition:box-shadow .12s}
   .coach-toggle{font:inherit;font-size:12.5px;font-weight:600;border:1px solid var(--line,#e6e9e8);background:var(--surface,#fff);color:var(--ink-2,#3c4a44);border-radius:9px;padding:6px 11px;cursor:pointer;display:inline-flex;align-items:center;gap:4px}
   .coach-toggle.off{opacity:.55}`;
   document.head.appendChild(st);
-  const div = document.createElement('div');
-  div.id = 'coachStack';
-  document.body.appendChild(div);
+  _tipEl = document.createElement('div'); _tipEl.id = 'coachTip';
+  document.body.appendChild(_tipEl);
 }
-function clearToasts() { const s = document.getElementById('coachStack'); if (s) s.innerHTML = ''; }
-function showToast(title, text, ai) {
-  ensureCoachUI();
-  const stack = document.getElementById('coachStack');
-  const id = 'ct' + (++_toastSeq);
-  const el = document.createElement('div');
-  el.className = 'coach-toast'; el.id = id;
-  el.innerHTML = `<div class="ct-head">💡 <span>${esc(title)}</span>${ai ? '<span class="ct-ai">AI</span>' : ''}<button class="ct-x" title="Закрыть">×</button></div><div class="ct-body">${esc(text)}</div>`;
-  el.querySelector('.ct-x').onclick = () => el.remove();
-  stack.appendChild(el);
-  el._timer = setTimeout(() => el.remove(), 15000);
-  return id;
+function setTip(label, text, ai) {
+  _tipEl.innerHTML = `<div class="tt-h">💡 <span>${esc(label || 'Подсказка')}</span>${ai ? '<span class="tt-ai">AI</span>' : ''}</div><div>${esc(text)}</div>`;
 }
-function updateToast(id, title, text, ai) {
-  const el = document.getElementById(id);
-  if (!el) { showToast(title, text, ai); return; }
-  clearTimeout(el._timer);
-  el.querySelector('.ct-head').innerHTML = `💡 <span>${esc(title)}</span>${ai ? '<span class="ct-ai">AI</span>' : ''}<button class="ct-x" title="Закрыть">×</button>`;
-  el.querySelector('.ct-body').textContent = text;
-  el.querySelector('.ct-x').onclick = () => el.remove();
-  el._timer = setTimeout(() => el.remove(), 17000);
+function placeTip(el) {
+  const r = el.getBoundingClientRect();
+  _tipEl.style.display = 'block';
+  const tw = _tipEl.offsetWidth, th = _tipEl.offsetHeight;
+  let left = r.right + 12, top = r.top;
+  if (left + tw > window.innerWidth - 10) { left = Math.min(r.left, window.innerWidth - tw - 10); top = r.bottom + 8; }
+  if (top + th > window.innerHeight - 10) top = Math.max(10, window.innerHeight - th - 10);
+  left = Math.max(10, left);
+  _tipEl.style.left = left + 'px'; _tipEl.style.top = top + 'px';
 }
+function showTip(el) {
+  if (!_hintsOn) return;
+  const text = el.getAttribute('data-hint'); if (!text) return;
+  ensureTipUI();
+  _tipFor = el;
+  const label = el.getAttribute('data-hintkey') || '';
+  el.classList.add('coach-hl');
+  const key = label || text.slice(0, 40);
+  if (_hintCache[key]) { setTip(label, _hintCache[key], true); placeTip(el); }
+  else {
+    setTip(label, text, false); placeTip(el);
+    grokHint('field', key, text).then(h => { if (h) { _hintCache[key] = h; if (_tipFor === el) { setTip(label, h, true); placeTip(el); } } });
+  }
+}
+function hideTip() {
+  if (_tipEl) _tipEl.style.display = 'none';
+  if (_tipFor) { _tipFor.classList.remove('coach-hl'); _tipFor = null; }
+}
+
+document.addEventListener('mouseover', (e) => {
+  const el = e.target.closest && e.target.closest('[data-hint]');
+  if (el && el !== _tipFor) showTip(el);
+});
+document.addEventListener('mouseout', (e) => {
+  const el = e.target.closest && e.target.closest('[data-hint]');
+  if (el && _tipFor === el && !el.contains(e.relatedTarget)) hideTip();
+});
+document.addEventListener('focusin', (e) => { const el = e.target.closest && e.target.closest('[data-hint]'); if (el) showTip(el); });
+document.addEventListener('focusout', (e) => { const el = e.target.closest && e.target.closest('[data-hint]'); if (el && _tipFor === el) hideTip(); });
+window.addEventListener('scroll', () => { if (_tipFor) placeTip(_tipFor); }, true);
+
+startHintObserver();
 
 /* ── DMC ─────────────────────────────────────────────────────────────────── */
 async function renderDmc(active) {
@@ -2349,7 +2393,6 @@ function ensureCalcStyle() {
 }
 
 function renderCalc(active) {
-  coach('calc');
   const s = calcSt;
   const totSupp = s.stops.reduce((a, st) => a + suppOf(st), 0);
   const stopRows = s.stops.length ? s.stops.map((st, i) => `<div class="cgr acc">
