@@ -1,4 +1,4 @@
-/* waylo build 2026-06-26 v8 · calc dropdowns show all hotels+cities+transport (price optional) */
+/* waylo build 2026-06-26 v9 · supplier self-pricing (hotel/transport set own prices) */
 /* ===========================================================================
    НАСТРОЙКА: вставь свой anon-ключ (Supabase → Settings → API → anon public).
    anon-ключ публичный и безопасный для клиента — доступ к данным режет RLS.
@@ -373,6 +373,8 @@ const LABEL_HINTS = {
   'Номер': 'Выберите категорию номера из каталога, чтобы добавить в тур.',
   // — платформа: цены —
   'Цена нетто (видит DMC)': 'Цена к продаже, которую видит DMC. Себестоимость поставщика остаётся скрытой.',
+  'Цена за номер / ночь': 'Цена за ночь, которую вы устанавливаете сами — её платит DMC за проживание. Сбор Waylo добавляется отдельной строкой и вашу выплату не уменьшает.',
+  'Ваша цена, $': 'Цена за трансфер/день, которую вы назначаете сами. Её платит DMC; сбор Waylo идёт отдельной строкой.',
   'SGL-надбавка': 'Доплата за одноместное размещение.',
   'Retail (опц.)': 'Рекомендованная розничная цена (необязательно).',
   'Валюта': 'Валюта цены (например, USD).',
@@ -928,9 +930,10 @@ async function renderVoucher(reqId, lines) {
 
 /* ── HOTEL ───────────────────────────────────────────────────────────────── */
 async function renderHotel(active) {
-  if (!state.tab || !['cats', 'avail', 'bookings', 'confirm', 'finance', 'team'].includes(state.tab)) state.tab = 'cats';
+  if (!state.tab || !['cats', 'prices', 'avail', 'bookings', 'confirm', 'finance', 'team'].includes(state.tab)) state.tab = 'cats';
   navShell('Отель · ' + active.orgName, [
     { id:'cats', label:'Категории' },
+    { id:'prices', label:'Цены' },
     { id:'avail', label:'Доступность' },
     { id:'bookings', label:'Шахматка броней' },
     { id:'confirm', label:'Подтверждения' },
@@ -938,6 +941,7 @@ async function renderHotel(active) {
     { id:'team', label:'Команда' },
   ]);
   if (state.tab === 'cats') hotelCats(active);
+  else if (state.tab === 'prices') hotelPricing(active);
   else if (state.tab === 'avail') hotelAvail(active);
   else if (state.tab === 'bookings') hotelBookings(active);
   else if (state.tab === 'confirm') supplierConfirm(active, 'отель');
@@ -1681,9 +1685,10 @@ async function supplierFinance(active) {
 
 /* ── TRANSPORT ───────────────────────────────────────────────────────────── */
 async function renderTransport(active) {
-  if (!state.tab) state.tab = 'fleet';
-  navShell('Трансфер · ' + active.orgName, [{ id:'fleet', label:'Автопарк' }, { id:'avail', label:'Доступность' }, { id:'confirm', label:'Подтверждения' }, { id:'finance', label:'Финансы' }]);
+  if (!state.tab || !['fleet', 'rates', 'avail', 'confirm', 'finance'].includes(state.tab)) state.tab = 'fleet';
+  navShell('Трансфер · ' + active.orgName, [{ id:'fleet', label:'Автопарк' }, { id:'rates', label:'Тарифы' }, { id:'avail', label:'Доступность' }, { id:'confirm', label:'Подтверждения' }, { id:'finance', label:'Финансы' }]);
   if (state.tab === 'fleet') transportFleet(active);
+  else if (state.tab === 'rates') transportPricing(active);
   else if (state.tab === 'avail') transportAvail(active);
   else if (state.tab === 'confirm') supplierConfirm(active, 'трансфер');
   else supplierFinance(active);
@@ -1841,13 +1846,188 @@ async function transportAvail(active) {
 /* ── PLATFORM ────────────────────────────────────────────────────────────── */
 const ORG_BADGE = { DMC:'blue', HOTEL:'green', TRANSPORT:'amber', PLATFORM:'accent' };
 
-let priceForm = null;  // null | {room_type_id, id?, ...} — форма тарифа номера (только платформа)
+let priceForm = null;  // null | {room_type_id, id?, ...} — форма цены номера (отель/платформа)
+let tpriceForm = null; // null | {vehicle_class_id, id?, ...} — форма тарифа транспорта
 let feeEdit = false;   // редактирование настройки сервисного сбора
 
 /* ── Платформа · Цены ───────────────────────────────────────────────────────
    Прозрачная модель (0017): DMC видит НЕТТО (sell = net). Доход Waylo — отдельный
    раскрытый сервисный сбор (platform_setting.service_fee), применяется к счёту в
    0018. Здесь платформа задаёт нетто-цену на категорию и настраивает сбор. */
+
+/* ── Отель · Цены (поставщик задаёт цену номера сам) ─────────────────────────
+   Цена = sell_price (= net_price, прозрачно), её платит DMC за проживание.
+   Сбор Waylo (platform_setting.service_fee) добавляется отдельной строкой и
+   выплату отелю не уменьшает. Запись в room_rate разрешена владельцу (миграция 0030). */
+async function hotelPricing(active) {
+  const main = $('#main'); if (!main) return;
+  const [{ data: props }, { data: types }, { data: rates, error }, { data: settings }] = await Promise.all([
+    db.from('property').select('id,name,city,org_id,is_active').eq('org_id', active.orgId).order('name'),
+    db.from('room_type').select('id,property_id,name,short_name,is_active').order('name'),
+    db.from('room_rate').select('id,room_type_id,valid_from,valid_to,net_price,sell_price,sgl_supplement,currency').order('valid_from'),
+    db.from('platform_setting').select('key,value').eq('key', 'service_fee'),
+  ]);
+  if (error) { main.innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; return; }
+  const fee = (settings && settings[0] && settings[0].value) || { fee_type: 'percent', fee_value: 0, currency: 'USD' };
+  const feeText = fee.fee_type === 'fixed' ? `${money(fee.fee_value, fee.currency || 'USD')} за бронь` : `${Number(fee.fee_value) || 0}% сверху`;
+  const pById = Object.fromEntries((props || []).map(p => [p.id, p]));
+  const ratesByRt = {}; (rates || []).forEach(r => { (ratesByRt[r.room_type_id] = ratesByRt[r.room_type_id] || []).push(r); });
+  const typeList = (types || []).filter(t => pById[t.property_id]);
+  const byProp = {}; typeList.forEach(t => { (byProp[t.property_id] = byProp[t.property_id] || []).push(t); });
+  const propIds = Object.keys(byProp).sort((a, b) => (pById[a].name || '').localeCompare(pById[b].name || '', 'ru'));
+
+  let formHtml = '';
+  if (priceForm) {
+    const f = priceForm, isEdit = !!f.id;
+    const rt = typeList.find(t => t.id === f.room_type_id);
+    const pr = rt && pById[rt.property_id];
+    if (rt) {
+      const price = f.sell_price != null ? f.sell_price : (f.net_price != null ? f.net_price : '');
+      formHtml = `<div class="card" style="margin-bottom:14px"><div class="card-head">${isEdit ? 'Изменить цену' : 'Новая цена'} · ${esc(pr ? pr.name : '')} — ${esc(rt.name)}</div><div style="padding:14px">
+        <div class="row">
+          <div class="field" style="width:190px"><label>Цена за номер / ночь</label><input type="number" min="0" step="0.01" class="input" id="prPrice" value="${price}" placeholder="50"></div>
+          <div class="field" style="width:170px"><label>SGL-надбавка</label><input type="number" min="0" step="0.01" class="input" id="prSgl" value="${f.sgl_supplement != null ? f.sgl_supplement : 0}"></div>
+          <div class="field" style="width:90px"><label>Валюта</label><input class="input" id="prCur" value="${esc(f.currency || 'USD')}"></div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <div class="field" style="width:160px"><label>Действует с</label><input type="date" class="input" id="prFrom" value="${esc(f.valid_from || '2026-01-01')}"></div>
+          <div class="field" style="width:160px"><label>по</label><input type="date" class="input" id="prTo" value="${esc(f.valid_to || '2026-12-31')}"></div>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+          <button class="btn btn--primary btn--sm" id="prSave">${isEdit ? 'Сохранить' : 'Создать цену'}</button>
+          <button class="btn btn--ghost btn--sm" id="prCancel">Отмена</button>
+          <span id="prMsg" class="hint"></span>
+        </div>
+        <div class="hint" style="margin-top:8px">Эту цену платит DMC за проживание. Сервисный сбор Waylo (${esc(feeText)}) добавляется отдельной строкой к счёту и вашу выплату не уменьшает.</div>
+      </div></div>`;
+    }
+  }
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Цены</h1><div class="sub">Вы сами назначаете цену за номер. DMC платит её за проживание; сбор Waylo — отдельной строкой.</div></div></div>
+    <div id="prTop"></div>
+    <div class="card" style="margin-bottom:14px"><div class="card-head">Сервисный сбор Waylo</div><div style="padding:14px"><b>${esc(feeText)}</b> <span class="hint">— добавляется к счёту DMC поверх вашей цены, не уменьшая вашу выплату. Размер задаёт платформа.</span></div></div>
+    ${formHtml}
+    ${propIds.length ? propIds.map(pid => {
+      const p = pById[pid];
+      return `<div class="card" style="margin-bottom:12px"><div class="card-head">${esc(p.name)} · <span class="hint">${esc(p.city || '')}</span></div>
+      <table><thead><tr><th>Категория</th><th>Период</th><th style="text-align:right">Цена / ночь</th><th style="text-align:right">SGL</th><th></th></tr></thead><tbody>
+      ${byProp[pid].map(rt => {
+        const rs = ratesByRt[rt.id] || [];
+        const addBtn = `<button class="btn btn--ghost btn--sm prAdd" data-rt="${rt.id}">+ цена</button>`;
+        if (!rs.length) return `<tr><td><b>${esc(rt.name)}</b>${rt.is_active === false ? ' <span class="badge">выкл</span>' : ''}</td><td colspan="3" class="card-empty" style="padding:8px">Цена не задана — в каталоге пока без цены</td><td style="text-align:right">${addBtn}</td></tr>`;
+        return rs.map((r, i) => `<tr><td>${i === 0 ? `<b>${esc(rt.name)}</b>` : ''}</td><td class="hint">${esc(r.valid_from)} — ${esc(r.valid_to)}</td><td class="price" style="text-align:right">${money(r.sell_price, r.currency)}</td><td class="mono" style="text-align:right">${money(r.sgl_supplement, r.currency)}</td><td style="text-align:right;white-space:nowrap"><button class="btn btn--ghost btn--sm prEdit" data-id="${r.id}">Изменить</button> <button class="btn btn--ghost btn--sm prDel" data-id="${r.id}">✕</button>${i === rs.length - 1 ? ' ' + addBtn : ''}</td></tr>`).join('');
+      }).join('')}
+      </tbody></table></div>`;
+    }).join('') : `<div class="card"><div class="card-empty">Сначала добавьте объект и категории во вкладке «Категории».</div></div>`}`;
+
+  const allRates = rates || [];
+  const padd = (rtId) => { priceForm = { room_type_id: rtId, sgl_supplement: 0, currency: 'USD', valid_from: '2026-01-01', valid_to: '2026-12-31' }; hotelPricing(active); };
+  document.querySelectorAll('.prAdd').forEach(b => b.onclick = () => padd(b.dataset.rt));
+  document.querySelectorAll('.prEdit').forEach(b => b.onclick = () => { priceForm = allRates.find(r => r.id === b.dataset.id) || null; hotelPricing(active); });
+  document.querySelectorAll('.prDel').forEach(b => b.onclick = async () => {
+    if (!confirm('Удалить цену? Категория останется в каталоге без цены.')) return;
+    const { error } = await db.from('room_rate').delete().eq('id', b.dataset.id);
+    if (error) $('#prTop').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; else { priceForm = null; hotelPricing(active); }
+  });
+  const cancel = $('#prCancel'); if (cancel) cancel.onclick = () => { priceForm = null; hotelPricing(active); };
+  const save = $('#prSave'); if (save) save.onclick = async () => {
+    const price = parseFloat($('#prPrice').value);
+    const sgl = parseFloat($('#prSgl').value || '0') || 0;
+    const cur = ($('#prCur').value || 'USD').trim().toUpperCase();
+    const from = $('#prFrom').value, to = $('#prTo').value;
+    const msg = (t) => { $('#prMsg').innerHTML = `<span style="color:var(--red)">${esc(t)}</span>`; };
+    if (!(price >= 0)) return msg('Укажите цену за номер.');
+    if (!from || !to || from > to) return msg('Период задан неверно.');
+    const payload = { net_price: price, sell_price: price, sgl_supplement: sgl, currency: cur, valid_from: from, valid_to: to };
+    let error;
+    if (priceForm.id) ({ error } = await db.from('room_rate').update(payload).eq('id', priceForm.id));
+    else { payload.room_type_id = priceForm.room_type_id; ({ error } = await db.from('room_rate').insert(payload)); }
+    if (error) return msg(error.message);
+    priceForm = null; hotelPricing(active);
+  };
+}
+
+/* ── Трансфер · Тарифы (перевозчик задаёт цену сам) ──────────────────────────*/
+async function transportPricing(active) {
+  const main = $('#main'); if (!main) return;
+  const [{ data: vcs }, { data: rates, error }, { data: settings }] = await Promise.all([
+    db.from('vehicle_class').select('id,name,pax_min,pax_max,org_id').eq('org_id', active.orgId).order('name'),
+    db.from('transport_rate').select('id,vehicle_class_id,basis,valid_from,valid_to,net_price_per_unit,sell_price_per_unit,currency').order('valid_from'),
+    db.from('platform_setting').select('key,value').eq('key', 'service_fee'),
+  ]);
+  if (error) { main.innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; return; }
+  const fee = (settings && settings[0] && settings[0].value) || { fee_type: 'percent', fee_value: 0, currency: 'USD' };
+  const feeText = fee.fee_type === 'fixed' ? `${money(fee.fee_value, fee.currency || 'USD')} за бронь` : `${Number(fee.fee_value) || 0}% сверху`;
+  const ratesByVc = {}; (rates || []).forEach(r => { (ratesByVc[r.vehicle_class_id] = ratesByVc[r.vehicle_class_id] || []).push(r); });
+  const vById = Object.fromEntries((vcs || []).map(v => [v.id, v]));
+
+  let formHtml = '';
+  if (tpriceForm) {
+    const f = tpriceForm, isEdit = !!f.id; const v = vById[f.vehicle_class_id];
+    if (v) {
+      const price = f.sell_price_per_unit != null ? f.sell_price_per_unit : '';
+      formHtml = `<div class="card" style="margin-bottom:14px"><div class="card-head">${isEdit ? 'Изменить тариф' : 'Новый тариф'} · ${esc(v.name)}</div><div style="padding:14px">
+        <div class="row">
+          <div class="field" style="width:170px"><label>Тип сбора</label><select class="input" id="tpBasis"><option value="per_transfer" ${f.basis === 'per_transfer' ? 'selected' : ''}>за трансфер</option><option value="per_day" ${f.basis === 'per_day' ? 'selected' : ''}>за день</option></select></div>
+          <div class="field" style="width:170px"><label>Ваша цена, $</label><input type="number" min="0" step="0.01" class="input" id="tpPrice" value="${price}" placeholder="55"></div>
+          <div class="field" style="width:90px"><label>Валюта</label><input class="input" id="tpCur" value="${esc(f.currency || 'USD')}"></div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <div class="field" style="width:160px"><label>Действует с</label><input type="date" class="input" id="tpFrom" value="${esc(f.valid_from || '2026-01-01')}"></div>
+          <div class="field" style="width:160px"><label>по</label><input type="date" class="input" id="tpTo" value="${esc(f.valid_to || '2026-12-31')}"></div>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+          <button class="btn btn--primary btn--sm" id="tpSave">${isEdit ? 'Сохранить' : 'Создать тариф'}</button>
+          <button class="btn btn--ghost btn--sm" id="tpCancel">Отмена</button>
+          <span id="tpMsg" class="hint"></span>
+        </div>
+        <div class="hint" style="margin-top:8px">Эту цену платит DMC. Сервисный сбор Waylo (${esc(feeText)}) добавляется отдельной строкой.</div>
+      </div></div>`;
+    }
+  }
+
+  main.innerHTML = `
+    <div class="page-head"><div><h1>Тарифы</h1><div class="sub">Вы сами назначаете цену за трансфер/день. Сбор Waylo — отдельной строкой.</div></div></div>
+    <div id="tpTop"></div>
+    <div class="card" style="margin-bottom:14px"><div class="card-head">Сервисный сбор Waylo</div><div style="padding:14px"><b>${esc(feeText)}</b> <span class="hint">— поверх вашей цены, не уменьшает вашу выплату. Размер задаёт платформа.</span></div></div>
+    ${formHtml}
+    ${(vcs || []).length ? `<div class="card"><table><thead><tr><th>Класс</th><th>Pax</th><th>Тариф</th><th>Период</th><th style="text-align:right">Цена</th><th></th></tr></thead><tbody>
+      ${(vcs || []).map(v => {
+        const rs = ratesByVc[v.id] || [];
+        const addBtn = `<button class="btn btn--ghost btn--sm tpAdd" data-vc="${v.id}">+ тариф</button>`;
+        if (!rs.length) return `<tr><td><b>${esc(v.name)}</b></td><td class="mono">${v.pax_min}–${v.pax_max}</td><td colspan="2" class="card-empty" style="padding:8px">Цена не задана</td><td style="text-align:right">${addBtn}</td></tr>`;
+        return rs.map((r, i) => `<tr><td>${i === 0 ? `<b>${esc(v.name)}</b>` : ''}</td><td class="mono">${i === 0 ? `${v.pax_min}–${v.pax_max}` : ''}</td><td class="hint">${r.basis === 'per_transfer' ? 'за трансфер' : 'за день'}</td><td class="hint">${esc(r.valid_from)} — ${esc(r.valid_to)}</td><td class="price" style="text-align:right">${money(r.sell_price_per_unit, r.currency)}</td><td style="text-align:right;white-space:nowrap"><button class="btn btn--ghost btn--sm tpEdit" data-id="${r.id}">Изменить</button> <button class="btn btn--ghost btn--sm tpDel" data-id="${r.id}">✕</button>${i === rs.length - 1 ? ' ' + addBtn : ''}</td></tr>`).join('');
+      }).join('')}
+    </tbody></table></div>` : `<div class="card"><div class="card-empty">Сначала добавьте классы машин во вкладке «Автопарк».</div></div>`}`;
+
+  const allRates = rates || [];
+  const tadd = (vcId) => { tpriceForm = { vehicle_class_id: vcId, basis: 'per_transfer', currency: 'USD', valid_from: '2026-01-01', valid_to: '2026-12-31' }; transportPricing(active); };
+  document.querySelectorAll('.tpAdd').forEach(b => b.onclick = () => tadd(b.dataset.vc));
+  document.querySelectorAll('.tpEdit').forEach(b => b.onclick = () => { tpriceForm = allRates.find(r => r.id === b.dataset.id) || null; transportPricing(active); });
+  document.querySelectorAll('.tpDel').forEach(b => b.onclick = async () => {
+    if (!confirm('Удалить тариф?')) return;
+    const { error } = await db.from('transport_rate').delete().eq('id', b.dataset.id);
+    if (error) $('#tpTop').innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; else { tpriceForm = null; transportPricing(active); }
+  });
+  const cancel = $('#tpCancel'); if (cancel) cancel.onclick = () => { tpriceForm = null; transportPricing(active); };
+  const save = $('#tpSave'); if (save) save.onclick = async () => {
+    const price = parseFloat($('#tpPrice').value);
+    const basis = $('#tpBasis').value;
+    const cur = ($('#tpCur').value || 'USD').trim().toUpperCase();
+    const from = $('#tpFrom').value, to = $('#tpTo').value;
+    const msg = (t) => { $('#tpMsg').innerHTML = `<span style="color:var(--red)">${esc(t)}</span>`; };
+    if (!(price >= 0)) return msg('Укажите цену.');
+    if (!from || !to || from > to) return msg('Период задан неверно.');
+    const payload = { basis, net_price_per_unit: price, sell_price_per_unit: price, currency: cur, valid_from: from, valid_to: to };
+    let error;
+    if (tpriceForm.id) ({ error } = await db.from('transport_rate').update(payload).eq('id', tpriceForm.id));
+    else { payload.vehicle_class_id = tpriceForm.vehicle_class_id; ({ error } = await db.from('transport_rate').insert(payload)); }
+    if (error) return msg(error.message);
+    tpriceForm = null; transportPricing(active);
+  };
+}
+
 async function platformPricing() {
   const main = $('#main'); if (!main) return;
   const [{ data: props }, { data: types }, { data: rates, error }, { data: settings }] = await Promise.all([
