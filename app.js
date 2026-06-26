@@ -342,10 +342,36 @@ async function dmcDashboard(active) {
 }
 
 /* ── DMC · Каталог (Atlas-карточки, на реальных данных) ──────────────────────*/
+/* ── простой лайтбокс просмотра фото объекта (DMC) ───────────────────────────*/
+function openGallery(photos, title) {
+  let i = 0;
+  const ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(15,20,18,.92);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px';
+  const render = () => {
+    ov.innerHTML = `
+      <div style="color:#eafaf6;font-weight:600;margin-bottom:12px">${esc(title || '')} <span style="opacity:.7;font-weight:400">${i + 1}/${photos.length}</span></div>
+      <img src="${esc(photos[i])}" style="max-width:90vw;max-height:72vh;object-fit:contain;border-radius:10px;background:#fff">
+      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;justify-content:center;max-width:90vw">
+        ${photos.map((u, k) => `<img class="galThumb" data-k="${k}" src="${esc(u)}" style="width:58px;height:44px;object-fit:cover;border-radius:6px;cursor:pointer;border:2px solid ${k === i ? '#fff' : 'transparent'}">`).join('')}
+      </div>
+      <div style="margin-top:14px;display:flex;gap:10px">
+        ${photos.length > 1 ? '<button class="btn btn--ghost" id="galPrev">‹ Назад</button><button class="btn btn--ghost" id="galNext">Вперёд ›</button>' : ''}
+        <button class="btn btn--primary" id="galClose">Закрыть</button>
+      </div>`;
+    ov.querySelectorAll('.galThumb').forEach(t => t.onclick = (e) => { e.stopPropagation(); i = +t.dataset.k; render(); });
+    const pv = ov.querySelector('#galPrev'); if (pv) pv.onclick = (e) => { e.stopPropagation(); i = (i - 1 + photos.length) % photos.length; render(); };
+    const nx = ov.querySelector('#galNext'); if (nx) nx.onclick = (e) => { e.stopPropagation(); i = (i + 1) % photos.length; render(); };
+    const cl = ov.querySelector('#galClose'); if (cl) cl.onclick = () => ov.remove();
+  };
+  ov.onclick = (e) => { if (e.target === ov) ov.remove(); };
+  render();
+  document.body.appendChild(ov);
+}
+
 async function dmcCatalog() {
   const main = $('#main'); if (!main) return;
   const [{ data: props }, { data: types }, { data: rates, error }, { data: vcs }, { data: trates }] = await Promise.all([
-    db.from('property').select('id,name,city,kind,star_category,photo_url').eq('is_active', true),
+    db.from('property').select('id,name,city,kind,star_category,photo_url,photos').eq('is_active', true),
     db.from('room_type').select('id,property_id,name,photo_url'),
     db.from('room_rate_public').select('room_type_id,sell_price,currency'),
     db.from('vehicle_class').select('id,name,pax_min,pax_max'),
@@ -357,7 +383,7 @@ async function dmcCatalog() {
   // группируем тарифы по объекту: мин. цена + число категорий
   const byProp = {};
   (rates || []).forEach(r => { const t = tById[r.room_type_id]; if (!t) return; const pid = t.property_id; const e = byProp[pid] || { min: Infinity, cats: 0, cur: r.currency, photo: null }; e.min = Math.min(e.min, Number(r.sell_price) || 0); e.cats += 1; if (!e.photo && t.photo_url) e.photo = t.photo_url; byProp[pid] = e; });
-  const cards = (props || []).filter(p => byProp[p.id]).map(p => ({ ...p, min: byProp[p.id].min, cats: byProp[p.id].cats, cur: byProp[p.id].cur, photo: byProp[p.id].photo }))
+  const cards = (props || []).filter(p => byProp[p.id]).map(p => ({ ...p, min: byProp[p.id].min, cats: byProp[p.id].cats, cur: byProp[p.id].cur, photo: byProp[p.id].photo, gallery: (p.photos && p.photos.length) ? p.photos : (p.photo_url ? [p.photo_url] : (byProp[p.id].photo ? [byProp[p.id].photo] : [])) }))
     .sort((a, b) => (a.city || '').localeCompare(b.city || '', 'ru'));
   const vById = Object.fromEntries((vcs || []).map(v => [v.id, v]));
   const trows = (trates || []).map(r => { const v = vById[r.vehicle_class_id]; return v ? { ...r, vname: v.name, pax: `${v.pax_min}–${v.pax_max}` } : null; }).filter(Boolean);
@@ -369,10 +395,11 @@ async function dmcCatalog() {
     <div id="catGrid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px">
       ${cards.length ? cards.map(c => `
         <div class="card catCard" data-q="${esc((c.name + ' ' + c.city).toLowerCase())}">
-          <div style="height:110px;position:relative;display:flex;align-items:flex-end;padding:12px;overflow:hidden;background:repeating-linear-gradient(135deg,var(--line-2) 0 12px,var(--line) 12px 24px)">
-            ${(c.photo_url || c.photo) ? `<img src="${esc(c.photo_url || c.photo)}" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover" onerror="this.remove()">` : ''}
+          <div class="catCover" data-id="${c.id}" style="height:110px;position:relative;display:flex;align-items:flex-end;padding:12px;overflow:hidden;background:repeating-linear-gradient(135deg,var(--line-2) 0 12px,var(--line) 12px 24px);cursor:${c.gallery.length ? 'zoom-in' : 'default'}">
+            ${c.gallery.length ? `<img src="${esc(c.gallery[0])}" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover" onerror="this.remove()">` : ''}
             <span style="position:relative;z-index:1;background:rgba(255,255,255,.92);border-radius:7px;padding:4px 9px;font-size:11px;font-weight:600;color:${c.kind === 'resort' ? 'var(--accent-ink)' : 'var(--ink-2)'}">${esc(KIND[c.kind] || 'Объект')}</span>
             ${c.star_category ? `<span style="position:absolute;top:12px;right:12px;z-index:1;font-size:12px;color:var(--amber);font-weight:600;background:rgba(255,255,255,.85);border-radius:6px;padding:1px 6px">${'★'.repeat(c.star_category)}</span>` : ''}
+            ${c.gallery.length ? `<span style="position:absolute;bottom:10px;right:10px;z-index:1;background:rgba(0,0,0,.6);color:#fff;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:600">\uD83D\uDCF7 ${c.gallery.length}</span>` : ''}
           </div>
           <div style="padding:15px 17px">
             <div style="font-weight:600;font-size:15px">${esc(c.name)}</div>
@@ -394,6 +421,8 @@ async function dmcCatalog() {
     const q = (search.value || '').trim().toLowerCase();
     document.querySelectorAll('.catCard').forEach(el => { el.style.display = !q || el.dataset.q.includes(q) ? '' : 'none'; });
   };
+  const galById = {}; cards.forEach(c => { galById[c.id] = { photos: c.gallery, name: c.name }; });
+  document.querySelectorAll('.catCover').forEach(el => el.onclick = () => { const g = galById[el.dataset.id]; if (g && g.photos.length) openGallery(g.photos, g.name); });
 }
 
 async function dmcRequests(active) {
