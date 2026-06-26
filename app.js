@@ -1,4 +1,4 @@
-/* waylo build 2026-06-26 v7 · catalog shows all uploaded objects (price optional) */
+/* waylo build 2026-06-26 v8 · calc dropdowns show all hotels+cities+transport (price optional) */
 /* ===========================================================================
    НАСТРОЙКА: вставь свой anon-ключ (Supabase → Settings → API → anon public).
    anon-ключ публичный и безопасный для клиента — доступ к данным режет RLS.
@@ -2315,13 +2315,16 @@ async function loadCalcCat() {
   ]);
   const pById = {}; (props || []).forEach(p => pById[p.id] = p);
   const rByRt = {}; (rates || []).forEach(r => { if (!rByRt[r.room_type_id]) rByRt[r.room_type_id] = r; });
-  const acc = (types || []).filter(t => rByRt[t.id] && pById[t.property_id]).map(t => {
-    const p = pById[t.property_id], r = rByRt[t.id], twin = Number(r.sell_price) || 0;
-    return { id: t.id, city: p.city, kind: p.kind, prop: p.name, room: t.name, twin, sgl: twin + (Number(r.sgl_supplement) || 0), supplier: p.org_id };
+  // ВСЕ категории активных объектов (не только с ценой). Цена платформы подставляется
+  // в поля TWIN/SGL, если задана; иначе DMC вводит цену вручную в строке расчёта.
+  const acc = (types || []).filter(t => pById[t.property_id]).map(t => {
+    const p = pById[t.property_id], r = rByRt[t.id];
+    const twin = r ? (Number(r.sell_price) || 0) : 0;
+    return { id: t.id, city: p.city, kind: p.kind, prop: p.name, room: t.name, twin, sgl: r ? twin + (Number(r.sgl_supplement) || 0) : 0, priced: !!r, supplier: p.org_id };
   });
-  const cities = [...new Set(acc.map(a => a.city))].sort((a, b) => a.localeCompare(b, 'ru'));
+  const cities = [...new Set(acc.map(a => a.city).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru'));
   const tByVc = {}; (trates || []).forEach(r => { if (!tByVc[r.vehicle_class_id]) tByVc[r.vehicle_class_id] = r; });
-  const veh = (vcs || []).filter(v => tByVc[v.id]).map(v => ({ id: v.id, name: v.name, day: Number(tByVc[v.id].sell_price_per_unit) || 0, supplier: v.org_id, cities: v.cities || [] })).sort((a, b) => a.day - b.day);
+  const veh = (vcs || []).map(v => ({ id: v.id, name: v.name, day: tByVc[v.id] ? (Number(tByVc[v.id].sell_price_per_unit) || 0) : 0, priced: !!tByVc[v.id], supplier: v.org_id, cities: v.cities || [] })).sort((a, b) => a.day - b.day);
   return { acc, cities, veh };
 }
 
@@ -2346,7 +2349,7 @@ function accOptionsForCity(city, selId) {
   if (!city) return h;
   calcCat.acc.filter(a => a.city === city).forEach(a => {
     const tag = a.kind === 'resort' ? ' · резорт' : '';
-    h += `<option value="${a.id}"${a.id === selId ? ' selected' : ''}>${esc(a.prop)} · ${esc(a.room)} — $${a.twin}${tag}</option>`;
+    h += `<option value="${a.id}"${a.id === selId ? ' selected' : ''}>${esc(a.prop)} · ${esc(a.room)} — ${a.priced ? '$' + a.twin : 'цена ?'}${tag}</option>`;
   });
   return h;
 }
@@ -2358,7 +2361,7 @@ function vehOptions(selId, city) {
     const cities = v.cities || [];
     const serves = !c || !cities.length || cities.some(x => norm(x) === c);
     if (!serves && v.id !== selId) return;
-    h += `<option value="${v.id}"${v.id === selId ? ' selected' : ''}>${esc(v.name)} — $${v.day}/дн</option>`;
+    h += `<option value="${v.id}"${v.id === selId ? ' selected' : ''}>${esc(v.name)} — ${v.priced ? '$' + v.day + '/дн' : 'цена ?'}</option>`;
   });
   return h;
 }
