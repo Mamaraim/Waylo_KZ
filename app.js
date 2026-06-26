@@ -372,18 +372,20 @@ async function dmcCatalog() {
   const main = $('#main'); if (!main) return;
   const [{ data: props }, { data: types }, { data: rates, error }, { data: vcs }, { data: trates }] = await Promise.all([
     db.from('property').select('id,name,city,kind,star_category,photo_url,photos').eq('is_active', true),
-    db.from('room_type').select('id,property_id,name,photo_url'),
+    db.from('room_type').select('id,property_id,name,photo_url,photos'),
     db.from('room_rate_public').select('room_type_id,sell_price,currency'),
     db.from('vehicle_class').select('id,name,pax_min,pax_max'),
     db.from('transport_rate_public').select('vehicle_class_id,basis,sell_price_per_unit,currency'),
   ]);
   if (error) { main.innerHTML = `<div class="notice notice--err">${esc(error.message)}</div>`; return; }
   const tById = Object.fromEntries((types || []).map(t => [t.id, t]));
+  const galByProp = {};
+  (types || []).forEach(t => { const ph = (t.photos && t.photos.length) ? t.photos : (t.photo_url ? [t.photo_url] : []); if (ph.length) (galByProp[t.property_id] = galByProp[t.property_id] || []).push(...ph); });
   const rateByRt = {}; (rates || []).forEach(r => { if (!rateByRt[r.room_type_id]) rateByRt[r.room_type_id] = r; });
   // группируем тарифы по объекту: мин. цена + число категорий
   const byProp = {};
   (rates || []).forEach(r => { const t = tById[r.room_type_id]; if (!t) return; const pid = t.property_id; const e = byProp[pid] || { min: Infinity, cats: 0, cur: r.currency, photo: null }; e.min = Math.min(e.min, Number(r.sell_price) || 0); e.cats += 1; if (!e.photo && t.photo_url) e.photo = t.photo_url; byProp[pid] = e; });
-  const cards = (props || []).filter(p => byProp[p.id]).map(p => ({ ...p, min: byProp[p.id].min, cats: byProp[p.id].cats, cur: byProp[p.id].cur, photo: byProp[p.id].photo, gallery: (p.photos && p.photos.length) ? p.photos : (p.photo_url ? [p.photo_url] : (byProp[p.id].photo ? [byProp[p.id].photo] : [])) }))
+  const cards = (props || []).filter(p => byProp[p.id]).map(p => ({ ...p, min: byProp[p.id].min, cats: byProp[p.id].cats, cur: byProp[p.id].cur, photo: byProp[p.id].photo, gallery: (function(){ const o = (p.photos && p.photos.length) ? p.photos.slice() : (p.photo_url ? [p.photo_url] : []); const all = o.concat(galByProp[p.id] || []); return all.length ? all : (byProp[p.id].photo ? [byProp[p.id].photo] : []); })() }))
     .sort((a, b) => (a.city || '').localeCompare(b.city || '', 'ru'));
   const vById = Object.fromEntries((vcs || []).map(v => [v.id, v]));
   const trows = (trates || []).map(r => { const v = vById[r.vehicle_class_id]; return v ? { ...r, vname: v.name, pax: `${v.pax_min}–${v.pax_max}` } : null; }).filter(Boolean);
@@ -579,7 +581,7 @@ function renderAddLine(reqId, onAdded) {
   $('#addHotelBtn').onclick = async () => {
     const [{ data: props }, { data: types }, { data: rates }] = await Promise.all([
       db.from('property').select('id,name,org_id').eq('is_active', true),
-      db.from('room_type').select('id,property_id,name,photo_url'),
+      db.from('room_type').select('id,property_id,name,photo_url,photos'),
       db.from('room_rate_public').select('room_type_id,sell_price,currency'),
     ]);
     const pById = Object.fromEntries((props || []).map(p => [p.id, p]));
@@ -1146,13 +1148,33 @@ function bindObjGallery(active) {
   };
 }
 
+let catGallery = [];  // галерея фото категории номера
+function renderGallery(arr, elId) {
+  const g = document.getElementById(elId); if (!g) return;
+  g.innerHTML = arr.length ? arr.map((u, i) => `<div style="position:relative;width:78px;height:58px"><img src="${esc(u)}" style="width:100%;height:100%;object-fit:cover;border-radius:6px;border:1px solid var(--line)">${i === 0 ? '<span style="position:absolute;bottom:2px;left:2px;font-size:9px;background:var(--accent);color:#fff;border-radius:4px;padding:0 4px">обложка</span>' : ''}<button type="button" class="galDel" data-i="${i}" style="position:absolute;top:-7px;right:-7px;width:18px;height:18px;border-radius:50%;border:none;background:var(--red);color:#fff;cursor:pointer;font-size:11px;line-height:1">×</button></div>`).join('') : '<span class="hint">фото не добавлены</span>';
+  g.querySelectorAll('.galDel').forEach(b => b.onclick = () => { arr.splice(+b.dataset.i, 1); renderGallery(arr, elId); });
+}
+function bindGallery(fileInputId, arr, elId, folder, max, msgId) {
+  const fi = document.getElementById(fileInputId); if (!fi) return;
+  fi.onchange = async () => {
+    const files = [...(fi.files || [])];
+    const msg = msgId && document.getElementById(msgId);
+    for (const f of files) {
+      if (arr.length >= max) { if (msg) msg.innerHTML = `<span style="color:var(--amber)">Максимум ${max} фото.</span>`; break; }
+      try { const blob = await compressToBlob(f); const url = await uploadToStorage(blob, folder); arr.push(url); renderGallery(arr, elId); }
+      catch (e) { if (msg) msg.innerHTML = `<span style="color:var(--red)">Загрузка не удалась: ${esc((e && e.message) || e)}. Применена ли миграция 0029 (бакет photos)?</span>`; }
+    }
+    fi.value = '';
+  };
+}
+
 async function hotelCats(active) {
   const main = $('#main'); if (!main) return;
   const { data: props } = await db.from('property').select('id,name,city,kind,star_category,is_active,photo_url,photos').eq('org_id', active.orgId).order('name');
   const propList = props || [];
   const pById = Object.fromEntries(propList.map(p => [p.id, p]));
   const ids = propList.map(p => p.id);
-  const { data: cats } = ids.length ? await db.from('room_type').select('id,property_id,name,short_name,max_occupancy,default_availability,is_active,photo_url').in('property_id', ids).order('name') : { data: [] };
+  const { data: cats } = ids.length ? await db.from('room_type').select('id,property_id,name,short_name,max_occupancy,default_availability,is_active,photo_url,photos').in('property_id', ids).order('name') : { data: [] };
   const list = cats || [];
   const KINDS = { city:'Городской отель', resort:'Резорт' };
 
@@ -1189,7 +1211,7 @@ async function hotelCats(active) {
         <div class="field" style="width:120px"><label>Основных мест</label><input type="number" min="1" class="input" id="cfOcc" value="${c.max_occupancy || 2}"></div>
         <div class="field" style="width:140px"><label>Дефолт-доступность</label><input type="number" min="0" class="input" id="cfDef" value="${c.default_availability || 0}"></div>
         <div class="field" style="width:90px"><label>Активна</label><select class="input" id="cfAct"><option value="1" ${c.is_active !== false ? 'selected' : ''}>Да</option><option value="0" ${c.is_active === false ? 'selected' : ''}>Нет</option></select></div>
-        <div class="field" style="flex:1;min-width:260px"><label>Фото категории</label><input type="file" accept="image/*" id="cfPhotoFile"><input type="hidden" id="cfPhoto" value="${esc(c.photo_url || '')}"><div id="cfPhotoPrev" style="margin-top:6px">${c.photo_url ? `<img src="${esc(c.photo_url)}" style="height:54px;border-radius:6px;object-fit:cover">` : '<span class="hint">фото не выбрано</span>'}</div></div>
+        <div class="field" style="flex:1;min-width:320px"><label>Фото категории (до 10, с диска)</label><input type="file" accept="image/*" multiple id="cfPhotoFiles"><div id="cfGallery" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px"></div></div>
       </div>
       <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
         <button class="btn btn--primary btn--sm" id="cfSave">${isEdit ? 'Сохранить' : 'Создать'}</button>
@@ -1238,7 +1260,11 @@ async function hotelCats(active) {
     renderObjGallery();
     bindObjGallery(active);
   }
-  pickPhoto('cfPhotoFile', 'cfPhoto', 'cfPhotoPrev');
+  if (catForm) {
+    catGallery = (catForm.photos && catForm.photos.length) ? catForm.photos.slice() : (catForm.photo_url ? [catForm.photo_url] : []);
+    renderGallery(catGallery, 'cfGallery');
+    bindGallery('cfPhotoFiles', catGallery, 'cfGallery', 'roomtype/' + (active.orgId || 'x'), 10, 'cfMsg');
+  }
   // объект: обработчики
   const padd = $('#propAdd'); if (padd) padd.onclick = () => { propForm = {}; catForm = null; hotelCats(active); };
   const pcancel = $('#pfCancel'); if (pcancel) pcancel.onclick = () => { propForm = null; hotelCats(active); };
@@ -1281,7 +1307,8 @@ async function hotelCats(active) {
       max_occupancy: Math.max(1, parseInt($('#cfOcc').value || '2', 10)),
       default_availability: Math.max(0, parseInt($('#cfDef').value || '0', 10)),
       is_active: $('#cfAct').value === '1',
-      photo_url: ($('#cfPhoto').value || '').trim() || null,
+      photo_url: catGallery[0] || null,
+      photos: catGallery.slice(),
     };
     let error;
     if (catForm.id) ({ error } = await db.from('room_type').update(payload).eq('id', catForm.id));
@@ -2044,7 +2071,7 @@ let calcTour = null;  // {id,name,pax,currency}
 async function loadCalcCat() {
   const [{ data: props }, { data: types }, { data: rates }, { data: vcs }, { data: trates }] = await Promise.all([
     db.from('property').select('id,name,city,kind,org_id').eq('is_active', true),
-    db.from('room_type').select('id,property_id,name,photo_url'),
+    db.from('room_type').select('id,property_id,name,photo_url,photos'),
     db.from('room_rate_public').select('room_type_id,sell_price,sgl_supplement'),
     db.from('vehicle_class').select('id,name,org_id,cities'),
     db.from('transport_rate_public').select('vehicle_class_id,sell_price_per_unit'),
