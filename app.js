@@ -1,4 +1,4 @@
-/* waylo build 2026-06-26 v5 · hover-tooltips at fields (Grok) + auth-fix */
+/* waylo build 2026-06-26 v6 · delete object (×) + hover-tooltips + auth-fix */
 /* ===========================================================================
    НАСТРОЙКА: вставь свой anon-ключ (Supabase → Settings → API → anon public).
    anon-ключ публичный и безопасный для клиента — доступ к данным режет RLS.
@@ -1452,7 +1452,7 @@ async function hotelCats(active) {
         <td class="hint">${esc(p.city || '—')}</td>
         <td class="hint">${esc(KINDS[p.kind] || p.kind || '—')}</td>
         <td class="mono" style="text-align:center">${p.star_category || '—'}</td>
-        <td style="text-align:right"><button class="btn btn--ghost btn--sm propEdit" data-id="${p.id}">Изменить</button></td>
+        <td style="text-align:right;white-space:nowrap"><button class="btn btn--ghost btn--sm propEdit" data-id="${p.id}">Изменить</button> <button class="btn btn--ghost btn--sm propDel" data-id="${p.id}">✕</button></td>
       </tr>`).join('')}
     </tbody></table>` : `<div class="card-empty">Объектов пока нет. Нажмите «Добавить объект».</div>`}</div>
 
@@ -1487,6 +1487,15 @@ async function hotelCats(active) {
   const padd = $('#propAdd'); if (padd) padd.onclick = () => { propForm = {}; catForm = null; hotelCats(active); };
   const pcancel = $('#pfCancel'); if (pcancel) pcancel.onclick = () => { propForm = null; hotelCats(active); };
   document.querySelectorAll('.propEdit').forEach(b => b.onclick = () => { propForm = propList.find(x => x.id === b.dataset.id) || {}; catForm = null; hotelCats(active); });
+  document.querySelectorAll('.propDel').forEach(b => b.onclick = async () => {
+    const p = propList.find(x => x.id === b.dataset.id);
+    if (!confirm('Удалить объект «' + (p && p.name || '') + '»?\n\nБудут удалены ВСЕ его категории номеров вместе с их доступностью, фото и ценами. Действие необратимо.')) return;
+    // сначала категории объекта (их доступность/тарифы уходят каскадом), затем сам объект
+    await db.from('room_type').delete().eq('property_id', b.dataset.id);
+    const { error } = await db.from('property').delete().eq('id', b.dataset.id);
+    if (error) { alert('Не удалось удалить объект: ' + error.message + '\n\nВозможно, по нему есть активные брони — их нужно закрыть.'); return; }
+    propForm = null; catForm = null; hotelCats(active);
+  });
   const psave = $('#pfSave'); if (psave) psave.onclick = async () => {
     const name = ($('#pfName').value || '').trim();
     if (!name) { $('#pfMsg').innerHTML = '<span style="color:var(--red)">Укажите название объекта.</span>'; return; }
