@@ -1,4 +1,4 @@
-/* waylo build 2026-06-26 v9 · supplier self-pricing (hotel/transport set own prices) */
+/* waylo build 2026-06-26 v10 · DMC room composition (single/double mix per location) */
 /* ===========================================================================
    НАСТРОЙКА: вставь свой anon-ключ (Supabase → Settings → API → anon public).
    anon-ключ публичный и безопасный для клиента — доступ к данным режет RLS.
@@ -2512,6 +2512,24 @@ function newCalc() {
   return { profit: 0, stops: [], trans: [], misc: [{ name: 'Вода', sum: 0 }, { name: 'Портеры', sum: 0 }] };
 }
 
+// ── состав номеров (DMC сам решает, кого как селить) ──
+// stop = { city, nights, rooms: [{ accId, occ:'dbl'|'sgl', qty }] }
+function roomCap(occ) { return occ === 'sgl' ? 1 : 2; }
+function roomUnit(a, occ) { return a ? (occ === 'sgl' ? (a.sgl || 0) : (a.twin || 0)) : 0; }
+function stopCovered(st) { return (st.rooms || []).reduce((n, r) => n + (r.qty || 0) * roomCap(r.occ), 0); }
+function stopCost(st, accById) { return (st.nights || 0) * (st.rooms || []).reduce((c, r) => c + (r.qty || 0) * roomUnit(accById[r.accId], r.occ), 0); }
+function stopMinSgl(st, accById) { const arr = (st.rooms || []).map(r => accById[r.accId]).filter(Boolean).map(a => a.sgl || 0); return arr.length ? Math.min(...arr) : 0; }
+// миграция старого формата (один accId/twin/sgl) → rooms[]
+function normalizeStops() {
+  const pax = (calcTour && calcTour.pax) || 2;
+  (calcSt.stops || []).forEach(st => {
+    if (!Array.isArray(st.rooms)) {
+      st.rooms = st.accId ? [{ accId: st.accId, occ: 'dbl', qty: Math.max(1, Math.ceil(pax / 2)) }] : [{ accId: '', occ: 'dbl', qty: 1 }];
+    }
+    delete st.twin; delete st.sgl; delete st.accId;
+  });
+}
+
 // транспорт — по одному городу маршрута (дни = ночи); значения сохраняем по городу
 function calcSync() {
   const s = calcSt;
@@ -2590,22 +2608,51 @@ function ensureCalcStyle() {
   .wcalc .crt tr.best td{background:var(--green-bg)}
   .wcalc .crt tr.best.tourpax td{background:var(--accent-soft)}
   .wcalc .crph{text-align:center;padding:22px 12px;color:var(--muted);font-size:12.5px;line-height:1.7}
+  .wcalc .cstop{border-bottom:6px solid var(--bg)}
+  .wcalc .cstop:last-of-type{border-bottom:none}
+  .wcalc .stophead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:11px 14px;border-bottom:1px solid var(--line-2);background:#fafbfb}
+  .wcalc .stophead .cCity{max-width:220px;flex:0 1 auto}
+  .wcalc .stophead select,.wcalc .stophead input{font:inherit;font-size:13px;border:1px solid var(--line);border-radius:7px;padding:7px 8px;background:var(--surface);color:var(--ink)}
+  .wcalc .rmrow{grid-template-columns:2.3fr 1.4fr .8fr .8fr .9fr 28px}
+  .wcalc .covbadge{margin-left:auto;font-size:11.5px;font-weight:600;border-radius:20px;padding:3px 10px}
+  .wcalc .covbadge.ok{color:var(--green);background:var(--green-bg)}
+  .wcalc .covbadge.warn{color:var(--amber);background:var(--amber-bg)}
   `;
   document.head.appendChild(st);
 }
 
 function renderCalc(active) {
   const s = calcSt;
-  const totSupp = s.stops.reduce((a, st) => a + suppOf(st), 0);
-  const stopRows = s.stops.length ? s.stops.map((st, i) => `<div class="cgr acc">
-    <select class="cCity" data-i="${i}">${cityOptions(st.city)}</select>
-    <select class="cAcc" data-i="${i}">${accOptionsForCity(st.city, st.accId)}</select>
-    <input type="number" min="1" class="cNig" data-i="${i}" value="${st.nights || 1}">
-    <input type="number" min="0" class="cTwn" data-i="${i}" value="${st.twin || 0}">
-    <input type="number" min="0" class="cSgl" data-i="${i}" value="${st.sgl || 0}">
-    <span class="csupp" id="csupp-${i}">${suppTxt(st)}</span>
-    <button class="cdel" data-act="delstop" data-i="${i}">×</button>
-  </div>`).join('') : `<div class="csub">Добавьте первую локацию маршрута.</div>`;
+  normalizeStops();
+  const accById = {}; (calcCat.acc || []).forEach(a => accById[a.id] = a);
+  const pax = (calcTour && calcTour.pax) || 0;
+  const stopsHtml = s.stops.length ? s.stops.map((st, i) => {
+    const cov = stopCovered(st);
+    const rms = (st.rooms || []).map((r, j) => {
+      const a = accById[r.accId];
+      const unit = roomUnit(a, r.occ);
+      const lc = unit * (r.qty || 0) * (st.nights || 0);
+      return `<div class="cgr rmrow">
+        <select class="rAcc" data-i="${i}" data-j="${j}">${accOptionsForCity(st.city, r.accId)}</select>
+        <select class="rOcc" data-i="${i}" data-j="${j}"><option value="dbl"${r.occ !== 'sgl' ? ' selected' : ''}>2-местный (×2)</option><option value="sgl"${r.occ === 'sgl' ? ' selected' : ''}>1-местный (×1)</option></select>
+        <input type="number" min="1" class="rQty" data-i="${i}" data-j="${j}" value="${r.qty || 1}">
+        <span class="hint cright">${a ? '$' + unit : '—'}</span>
+        <span class="hint cright">${lc ? '$' + lc.toLocaleString('ru') : '—'}</span>
+        <button class="cdel" data-act="delroom" data-i="${i}" data-j="${j}">×</button>
+      </div>`;
+    }).join('');
+    return `<div class="cstop">
+      <div class="stophead">
+        <select class="cCity" data-i="${i}">${cityOptions(st.city)}</select>
+        <span class="hint" style="display:flex;align-items:center;gap:6px">Ночей <input type="number" min="1" class="cNig" data-i="${i}" value="${st.nights || 1}" style="width:56px"></span>
+        <span class="covbadge ${pax > 0 && cov === pax ? 'ok' : 'warn'}" id="cov-${i}">размещено ${cov} из ${pax || '—'}</span>
+        <button class="cdel" data-act="delstop" data-i="${i}" title="Удалить локацию">× локация</button>
+      </div>
+      <div class="cghead rmrow"><div>Категория номера</div><div>Расселение</div><div>Номеров</div><div class="cright">Цена/ноч</div><div class="cright">Итого</div><div></div></div>
+      ${rms || '<div class="csub">Нет номеров — нажмите «+ Номер».</div>'}
+      <div class="caddrow"><button class="btn btn--ghost btn--sm" data-act="addroom" data-i="${i}">+ Номер</button></div>
+    </div>`;
+  }).join('') : `<div class="csub">Добавьте первую локацию маршрута.</div>`;
   const transRows = s.trans.length ? s.trans.map((t, i) => `<div class="cgr gtr">
     <input class="cauto" value="${esc(t.city)}" readonly>
     <input class="cauto" value="${t.days}" readonly>
@@ -2632,11 +2679,9 @@ function renderCalc(active) {
       <div class="cinputs">
 
         <div class="card">
-          <div class="card-head">Маршрут · проживание</div>
-          <div class="cghead acc"><div>Город</div><div>Отель / резорт</div><div>Ноч.</div><div>Twin $</div><div>SGL $</div><div>SGL suppl.</div><div></div></div>
-          ${stopRows}
+          <div class="card-head">Маршрут · проживание <span class="hint" style="font-weight:400">состав номеров — на ваш выбор</span></div>
+          ${stopsHtml}
           <div class="caddrow"><button class="btn btn--ghost btn--sm" data-act="addstop">+ Добавить локацию</button></div>
-          <div class="ctot" id="cTotSupp" style="${totSupp > 0 ? '' : 'display:none'}">Single supplement итого: +$${totSupp.toLocaleString('ru')}</div>
         </div>
 
         <div class="card">
@@ -2694,35 +2739,32 @@ function bindCalc(active) {
   const root = $('.wcalc'); if (!root) return;
   const s = calcSt;
   const accById = {}; calcCat.acc.forEach(a => accById[a.id] = a);
+  const pax = (calcTour && calcTour.pax) || 0;
   const reflow = () => { calcSync(); renderCalc(active); };
-  const updSupp = (i) => {
-    const el = document.getElementById('csupp-' + i); if (el) el.textContent = suppTxt(s.stops[i]);
-    const tot = s.stops.reduce((a, st) => a + suppOf(st), 0);
-    const te = document.getElementById('cTotSupp'); if (te) { te.textContent = 'Single supplement итого: +$' + tot.toLocaleString('ru'); te.style.display = tot > 0 ? 'block' : 'none'; }
-  };
+  const updCov = (i) => { const el = document.getElementById('cov-' + i); if (!el) return; const cov = stopCovered(s.stops[i]); el.textContent = 'размещено ' + cov + ' из ' + (pax || '—'); el.className = 'covbadge ' + ((pax > 0 && cov === pax) ? 'ok' : 'warn'); };
 
   root.addEventListener('click', (e) => {
     const el = e.target.closest('[data-act]'); if (!el) return;
     const act = el.dataset.act, i = +el.dataset.i;
-    if (act === 'addstop') { s.stops.push({ accId: '', city: '', nights: 1, twin: 0, sgl: 0 }); reflow(); }
+    if (act === 'addstop') { s.stops.push({ city: '', nights: 1, rooms: [{ accId: '', occ: 'dbl', qty: 1 }] }); reflow(); }
     else if (act === 'delstop') { s.stops.splice(i, 1); reflow(); }
+    else if (act === 'addroom') { (s.stops[i].rooms = s.stops[i].rooms || []).push({ accId: '', occ: 'dbl', qty: 1 }); reflow(); }
+    else if (act === 'delroom') { s.stops[i].rooms.splice(+el.dataset.j, 1); if (!s.stops[i].rooms.length) s.stops[i].rooms.push({ accId: '', occ: 'dbl', qty: 1 }); reflow(); }
     else if (act === 'addmisc') { s.misc.push({ name: '', sum: 0 }); renderCalc(active); }
     else if (act === 'delmisc') { s.misc.splice(i, 1); renderCalc(active); }
   });
 
   root.addEventListener('change', (e) => {
-    const t = e.target;
+    const t = e.target, i = +t.dataset.i, j = +t.dataset.j;
     if (t.classList.contains('cCity')) {
-      const st = s.stops[+t.dataset.i];
-      st.city = t.value; st.accId = ''; st.twin = 0; st.sgl = 0;
-      reflow();
-    } else if (t.classList.contains('cAcc')) {
-      const a = accById[t.value]; const st = s.stops[+t.dataset.i];
-      if (a) { st.accId = a.id; st.city = a.city; st.twin = a.twin; st.sgl = a.sgl; } else { st.accId = ''; }
-      reflow();
+      const st = s.stops[i]; st.city = t.value; st.rooms = [{ accId: '', occ: 'dbl', qty: 1 }]; reflow();
+    } else if (t.classList.contains('rAcc')) {
+      s.stops[i].rooms[j].accId = t.value; reflow();
+    } else if (t.classList.contains('rOcc')) {
+      s.stops[i].rooms[j].occ = t.value; reflow();
     } else if (t.classList.contains('cTveh')) {
-      const v = calcCat.veh.find(x => x.id === t.value); const tr = s.trans[+t.dataset.i];
-      if (v) { tr.vehId = v.id; tr.price = v.day; } else { tr.vehId = ''; }
+      const vv = calcCat.veh.find(x => x.id === t.value); const tr = s.trans[i];
+      if (vv) { tr.vehId = vv.id; tr.price = vv.day; } else { tr.vehId = ''; }
       renderCalc(active);
     } else if (t.classList.contains('cNig')) {
       reflow();
@@ -2730,11 +2772,10 @@ function bindCalc(active) {
   });
 
   root.addEventListener('input', (e) => {
-    const t = e.target, v = t.value, i = +t.dataset.i;
+    const t = e.target, v = t.value, i = +t.dataset.i, j = +t.dataset.j;
     if (t.id === 'cProfit') { s.profit = +v || 0; calcCompute(); }
-    else if (t.classList.contains('cNig')) { s.stops[i].nights = +v || 1; updSupp(i); calcCompute(); }
-    else if (t.classList.contains('cTwn')) { s.stops[i].twin = +v || 0; updSupp(i); calcCompute(); }
-    else if (t.classList.contains('cSgl')) { s.stops[i].sgl = +v || 0; updSupp(i); calcCompute(); }
+    else if (t.classList.contains('cNig')) { s.stops[i].nights = +v || 1; updCov(i); calcCompute(); }
+    else if (t.classList.contains('rQty')) { s.stops[i].rooms[j].qty = Math.max(0, +v || 0); updCov(i); calcCompute(); }
     else if (t.classList.contains('cTpr')) { s.trans[i].price = +v || 0; calcCompute(); }
     else if (t.classList.contains('cMn')) { s.misc[i].name = v; }
     else if (t.classList.contains('cMs')) { s.misc[i].sum = +v || 0; calcCompute(); }
@@ -2758,8 +2799,10 @@ function calcCompute() {
   const transFixed = s.trans.reduce((a, t) => a + (t.price || 0) * (t.days || 0), 0);
   const miscFixed = s.misc.reduce((a, x) => a + (x.sum || 0), 0);
   const totalFixed = transFixed + miscFixed;
-  const hotelSgl1 = s.stops.reduce((a, st) => a + (st.sgl || 0) * (st.nights || 0), 0);
-  const hotelCost = (pax) => s.stops.reduce((a, st) => a + Math.ceil(pax / 2) * (st.twin || 0) * (st.nights || 0), 0);
+  const accById = {}; (calcCat.acc || []).forEach(a => accById[a.id] = a);
+  const hotelFixed = s.stops.reduce((a, st) => a + stopCost(st, accById), 0);          // фикс по составу номеров
+  const hotelSgl1 = s.stops.reduce((a, st) => a + (st.nights || 0) * stopMinSgl(st, accById), 0); // 1 single для FOC-лидера
+  const hotelCost = () => hotelFixed;  // больше не зависит от pax — берём заданный состав
 
   let minCpp = Infinity, bestPax = 1;
   for (let p = 1; p <= 39; p++) { const cpp = (hotelCost(p) + totalFixed) / p + profit; if (cpp < minCpp) { minCpp = cpp; bestPax = p; } }
@@ -2815,19 +2858,22 @@ async function calcBook() {
   if (!calcSt.stops.length) { fail('добавьте хотя бы одну локацию'); return; }
   const accById = {}; (calcCat.acc || []).forEach(a => accById[a.id] = a);
   const vehById = {}; (calcCat.veh || []).forEach(v => vehById[v.id] = v);
-  const rooms = Math.ceil((calcTour.pax || 1) / 2);
   let cursor = calcTour.start;
   const lines = [];
   for (const st of calcSt.stops) {
-    if (!st.accId) { fail('выберите отель/резорт во всех локациях'); return; }
-    const a = accById[st.accId]; if (!a) { fail('не найден отель в каталоге'); return; }
     const from = cursor, to = addDays(cursor, st.nights || 1);
-    lines.push({ supplier: a.supplier, type: 'HOTEL', res: 'room', resource_id: st.accId, from, to, quantity: rooms, sell: st.twin });
+    const rms = (st.rooms || []).filter(r => r.accId && (r.qty || 0) > 0);
+    if (!rms.length) { fail('в каждой локации добавьте хотя бы один номер с выбранной категорией'); return; }
+    for (const r of rms) {
+      const a = accById[r.accId]; if (!a) { fail('категория номера не найдена в каталоге'); return; }
+      lines.push({ supplier: a.supplier, type: 'HOTEL', res: 'room', resource_id: r.accId, from, to, quantity: r.qty, sell: roomUnit(a, r.occ) });
+    }
     const t = (calcSt.trans || []).find(x => x.city === st.city && x.vehId);
     if (t) { const v = vehById[t.vehId]; if (v) lines.push({ supplier: v.supplier, type: 'TRANSPORT', res: 'vehicle', resource_id: t.vehId, from, to, quantity: 1, sell: t.price }); }
     cursor = to;
   }
-  if (!confirm('Отправить бронь поставщикам?\n\nПозиций: ' + lines.length + '\nНомеров на локацию: ' + rooms + ' (PAX ' + (calcTour.pax || 1) + ', по 2 в номере)\nДаты от ' + calcTour.start + '\n\nПрежние холды по этому туру будут пересозданы.')) return;
+  const totalRooms = lines.filter(l => l.type === 'HOTEL').reduce((a, l) => a + l.quantity, 0);
+  if (!confirm('Отправить бронь поставщикам?\n\nПозиций: ' + lines.length + '\nНомеров всего: ' + totalRooms + ' (PAX ' + (calcTour.pax || 1) + ')\nДаты от ' + calcTour.start + '\n\nПрежние холды по этому туру будут пересозданы.')) return;
   const btn = $('#cBookBtn'); if (btn) { btn.disabled = true; btn.textContent = 'Бронирую…'; }
   try {
     await db.from('request').update({ calc: calcSt }).eq('id', calcTour.id);
