@@ -1,4 +1,4 @@
-/* waylo build 2026-06-26 v10 · DMC room composition (single/double mix per location) */
+/* waylo build 2026-06-26 v11 · DMC room composition by category+qty, price auto from hotel */
 /* ===========================================================================
    НАСТРОЙКА: вставь свой anon-ключ (Supabase → Settings → API → anon public).
    anon-ключ публичный и безопасный для клиента — доступ к данным режет RLS.
@@ -2488,7 +2488,7 @@ let calcTour = null;  // {id,name,pax,currency}
 async function loadCalcCat() {
   const [{ data: props }, { data: types }, { data: rates }, { data: vcs }, { data: trates }] = await Promise.all([
     db.from('property').select('id,name,city,kind,org_id').eq('is_active', true),
-    db.from('room_type').select('id,property_id,name,photo_url,photos'),
+    db.from('room_type').select('id,property_id,name,max_occupancy,photo_url,photos'),
     db.from('room_rate_public').select('room_type_id,sell_price,sgl_supplement'),
     db.from('vehicle_class').select('id,name,org_id,cities'),
     db.from('transport_rate_public').select('vehicle_class_id,sell_price_per_unit'),
@@ -2500,7 +2500,7 @@ async function loadCalcCat() {
   const acc = (types || []).filter(t => pById[t.property_id]).map(t => {
     const p = pById[t.property_id], r = rByRt[t.id];
     const twin = r ? (Number(r.sell_price) || 0) : 0;
-    return { id: t.id, city: p.city, kind: p.kind, prop: p.name, room: t.name, twin, sgl: r ? twin + (Number(r.sgl_supplement) || 0) : 0, priced: !!r, supplier: p.org_id };
+    return { id: t.id, city: p.city, kind: p.kind, prop: p.name, room: t.name, twin, sgl: r ? twin + (Number(r.sgl_supplement) || 0) : 0, cap: Math.max(1, t.max_occupancy || 2), priced: !!r, supplier: p.org_id };
   });
   const cities = [...new Set(acc.map(a => a.city).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru'));
   const tByVc = {}; (trates || []).forEach(r => { if (!tByVc[r.vehicle_class_id]) tByVc[r.vehicle_class_id] = r; });
@@ -2514,18 +2514,18 @@ function newCalc() {
 
 // ── состав номеров (DMC сам решает, кого как селить) ──
 // stop = { city, nights, rooms: [{ accId, occ:'dbl'|'sgl', qty }] }
-function roomCap(occ) { return occ === 'sgl' ? 1 : 2; }
-function roomUnit(a, occ) { return a ? (occ === 'sgl' ? (a.sgl || 0) : (a.twin || 0)) : 0; }
-function stopCovered(st) { return (st.rooms || []).reduce((n, r) => n + (r.qty || 0) * roomCap(r.occ), 0); }
-function stopCost(st, accById) { return (st.nights || 0) * (st.rooms || []).reduce((c, r) => c + (r.qty || 0) * roomUnit(accById[r.accId], r.occ), 0); }
-function stopMinSgl(st, accById) { const arr = (st.rooms || []).map(r => accById[r.accId]).filter(Boolean).map(a => a.sgl || 0); return arr.length ? Math.min(...arr) : 0; }
-// миграция старого формата (один accId/twin/sgl) → rooms[]
+function roomUnit(a) { return a ? (a.twin || 0) : 0; }              // цена номера = цена, заданная отелём
+function roomCapOf(a) { return a ? (a.cap || 2) : 2; }              // вместимость категории (мест)
+function stopCovered(st, accById) { return (st.rooms || []).reduce((n, r) => n + (r.qty || 0) * roomCapOf(accById[r.accId]), 0); }
+function stopCost(st, accById) { return (st.nights || 0) * (st.rooms || []).reduce((c, r) => c + (r.qty || 0) * roomUnit(accById[r.accId]), 0); }
+function stopMinRoom(st, accById) { const arr = (st.rooms || []).map(r => accById[r.accId]).filter(Boolean).map(a => a.twin || 0); return arr.length ? Math.min(...arr) : 0; }
+// миграция старого формата (один accId/twin/sgl) → rooms[{accId, qty}]
 function normalizeStops() {
-  const pax = (calcTour && calcTour.pax) || 2;
   (calcSt.stops || []).forEach(st => {
     if (!Array.isArray(st.rooms)) {
-      st.rooms = st.accId ? [{ accId: st.accId, occ: 'dbl', qty: Math.max(1, Math.ceil(pax / 2)) }] : [{ accId: '', occ: 'dbl', qty: 1 }];
+      st.rooms = st.accId ? [{ accId: st.accId, qty: Math.max(1, Math.ceil(((calcTour && calcTour.pax) || 2) / 2)) }] : [{ accId: '', qty: 1 }];
     }
+    (st.rooms || []).forEach(r => { delete r.occ; });
     delete st.twin; delete st.sgl; delete st.accId;
   });
 }
@@ -2547,7 +2547,7 @@ function accOptionsForCity(city, selId) {
   if (!city) return h;
   calcCat.acc.filter(a => a.city === city).forEach(a => {
     const tag = a.kind === 'resort' ? ' · резорт' : '';
-    h += `<option value="${a.id}"${a.id === selId ? ' selected' : ''}>${esc(a.prop)} · ${esc(a.room)} — ${a.priced ? '$' + a.twin : 'цена ?'}${tag}</option>`;
+    h += `<option value="${a.id}"${a.id === selId ? ' selected' : ''}>${esc(a.prop)} · ${esc(a.room)} (${a.cap} чел) — ${a.priced ? '$' + a.twin : 'цена ?'}${tag}</option>`;
   });
   return h;
 }
@@ -2613,7 +2613,7 @@ function ensureCalcStyle() {
   .wcalc .stophead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:11px 14px;border-bottom:1px solid var(--line-2);background:#fafbfb}
   .wcalc .stophead .cCity{max-width:220px;flex:0 1 auto}
   .wcalc .stophead select,.wcalc .stophead input{font:inherit;font-size:13px;border:1px solid var(--line);border-radius:7px;padding:7px 8px;background:var(--surface);color:var(--ink)}
-  .wcalc .rmrow{grid-template-columns:2.3fr 1.4fr .8fr .8fr .9fr 28px}
+  .wcalc .rmrow{grid-template-columns:2.6fr .8fr .7fr .9fr .9fr 28px}
   .wcalc .covbadge{margin-left:auto;font-size:11.5px;font-weight:600;border-radius:20px;padding:3px 10px}
   .wcalc .covbadge.ok{color:var(--green);background:var(--green-bg)}
   .wcalc .covbadge.warn{color:var(--amber);background:var(--amber-bg)}
@@ -2627,17 +2627,17 @@ function renderCalc(active) {
   const accById = {}; (calcCat.acc || []).forEach(a => accById[a.id] = a);
   const pax = (calcTour && calcTour.pax) || 0;
   const stopsHtml = s.stops.length ? s.stops.map((st, i) => {
-    const cov = stopCovered(st);
+    const cov = stopCovered(st, accById);
     const rms = (st.rooms || []).map((r, j) => {
       const a = accById[r.accId];
-      const unit = roomUnit(a, r.occ);
+      const unit = roomUnit(a);
       const lc = unit * (r.qty || 0) * (st.nights || 0);
       return `<div class="cgr rmrow">
         <select class="rAcc" data-i="${i}" data-j="${j}">${accOptionsForCity(st.city, r.accId)}</select>
-        <select class="rOcc" data-i="${i}" data-j="${j}"><option value="dbl"${r.occ !== 'sgl' ? ' selected' : ''}>2-местный (×2)</option><option value="sgl"${r.occ === 'sgl' ? ' selected' : ''}>1-местный (×1)</option></select>
         <input type="number" min="1" class="rQty" data-i="${i}" data-j="${j}" value="${r.qty || 1}">
-        <span class="hint cright">${a ? '$' + unit : '—'}</span>
-        <span class="hint cright">${lc ? '$' + lc.toLocaleString('ru') : '—'}</span>
+        <span class="hint cright">${a ? roomCapOf(a) + ' чел' : '—'}</span>
+        <span class="hint cright">${a ? (a.priced ? '$' + unit + '/ноч' : 'цена ?') : '—'}</span>
+        <span class="cright" style="font-weight:600">${lc ? '$' + lc.toLocaleString('ru') : '—'}</span>
         <button class="cdel" data-act="delroom" data-i="${i}" data-j="${j}">×</button>
       </div>`;
     }).join('');
@@ -2648,7 +2648,7 @@ function renderCalc(active) {
         <span class="covbadge ${pax > 0 && cov === pax ? 'ok' : 'warn'}" id="cov-${i}">размещено ${cov} из ${pax || '—'}</span>
         <button class="cdel" data-act="delstop" data-i="${i}" title="Удалить локацию">× локация</button>
       </div>
-      <div class="cghead rmrow"><div>Категория номера</div><div>Расселение</div><div>Номеров</div><div class="cright">Цена/ноч</div><div class="cright">Итого</div><div></div></div>
+      <div class="cghead rmrow"><div>Категория номера</div><div>Номеров</div><div class="cright">Вмест.</div><div class="cright">Цена/ноч</div><div class="cright">Итого</div><div></div></div>
       ${rms || '<div class="csub">Нет номеров — нажмите «+ Номер».</div>'}
       <div class="caddrow"><button class="btn btn--ghost btn--sm" data-act="addroom" data-i="${i}">+ Номер</button></div>
     </div>`;
@@ -2741,15 +2741,15 @@ function bindCalc(active) {
   const accById = {}; calcCat.acc.forEach(a => accById[a.id] = a);
   const pax = (calcTour && calcTour.pax) || 0;
   const reflow = () => { calcSync(); renderCalc(active); };
-  const updCov = (i) => { const el = document.getElementById('cov-' + i); if (!el) return; const cov = stopCovered(s.stops[i]); el.textContent = 'размещено ' + cov + ' из ' + (pax || '—'); el.className = 'covbadge ' + ((pax > 0 && cov === pax) ? 'ok' : 'warn'); };
+  const updCov = (i) => { const el = document.getElementById('cov-' + i); if (!el) return; const cov = stopCovered(s.stops[i], accById); el.textContent = 'размещено ' + cov + ' из ' + (pax || '—'); el.className = 'covbadge ' + ((pax > 0 && cov === pax) ? 'ok' : 'warn'); };
 
   root.addEventListener('click', (e) => {
     const el = e.target.closest('[data-act]'); if (!el) return;
     const act = el.dataset.act, i = +el.dataset.i;
-    if (act === 'addstop') { s.stops.push({ city: '', nights: 1, rooms: [{ accId: '', occ: 'dbl', qty: 1 }] }); reflow(); }
+    if (act === 'addstop') { s.stops.push({ city: '', nights: 1, rooms: [{ accId: '', qty: 1 }] }); reflow(); }
     else if (act === 'delstop') { s.stops.splice(i, 1); reflow(); }
-    else if (act === 'addroom') { (s.stops[i].rooms = s.stops[i].rooms || []).push({ accId: '', occ: 'dbl', qty: 1 }); reflow(); }
-    else if (act === 'delroom') { s.stops[i].rooms.splice(+el.dataset.j, 1); if (!s.stops[i].rooms.length) s.stops[i].rooms.push({ accId: '', occ: 'dbl', qty: 1 }); reflow(); }
+    else if (act === 'addroom') { (s.stops[i].rooms = s.stops[i].rooms || []).push({ accId: '', qty: 1 }); reflow(); }
+    else if (act === 'delroom') { s.stops[i].rooms.splice(+el.dataset.j, 1); if (!s.stops[i].rooms.length) s.stops[i].rooms.push({ accId: '', qty: 1 }); reflow(); }
     else if (act === 'addmisc') { s.misc.push({ name: '', sum: 0 }); renderCalc(active); }
     else if (act === 'delmisc') { s.misc.splice(i, 1); renderCalc(active); }
   });
@@ -2757,11 +2757,9 @@ function bindCalc(active) {
   root.addEventListener('change', (e) => {
     const t = e.target, i = +t.dataset.i, j = +t.dataset.j;
     if (t.classList.contains('cCity')) {
-      const st = s.stops[i]; st.city = t.value; st.rooms = [{ accId: '', occ: 'dbl', qty: 1 }]; reflow();
+      const st = s.stops[i]; st.city = t.value; st.rooms = [{ accId: '', qty: 1 }]; reflow();
     } else if (t.classList.contains('rAcc')) {
       s.stops[i].rooms[j].accId = t.value; reflow();
-    } else if (t.classList.contains('rOcc')) {
-      s.stops[i].rooms[j].occ = t.value; reflow();
     } else if (t.classList.contains('cTveh')) {
       const vv = calcCat.veh.find(x => x.id === t.value); const tr = s.trans[i];
       if (vv) { tr.vehId = vv.id; tr.price = vv.day; } else { tr.vehId = ''; }
@@ -2801,7 +2799,7 @@ function calcCompute() {
   const totalFixed = transFixed + miscFixed;
   const accById = {}; (calcCat.acc || []).forEach(a => accById[a.id] = a);
   const hotelFixed = s.stops.reduce((a, st) => a + stopCost(st, accById), 0);          // фикс по составу номеров
-  const hotelSgl1 = s.stops.reduce((a, st) => a + (st.nights || 0) * stopMinSgl(st, accById), 0); // 1 single для FOC-лидера
+  const hotelSgl1 = s.stops.reduce((a, st) => a + (st.nights || 0) * stopMinRoom(st, accById), 0); // 1 номер для FOC-лидера
   const hotelCost = () => hotelFixed;  // больше не зависит от pax — берём заданный состав
 
   let minCpp = Infinity, bestPax = 1;
@@ -2866,7 +2864,7 @@ async function calcBook() {
     if (!rms.length) { fail('в каждой локации добавьте хотя бы один номер с выбранной категорией'); return; }
     for (const r of rms) {
       const a = accById[r.accId]; if (!a) { fail('категория номера не найдена в каталоге'); return; }
-      lines.push({ supplier: a.supplier, type: 'HOTEL', res: 'room', resource_id: r.accId, from, to, quantity: r.qty, sell: roomUnit(a, r.occ) });
+      lines.push({ supplier: a.supplier, type: 'HOTEL', res: 'room', resource_id: r.accId, from, to, quantity: r.qty, sell: roomUnit(a) });
     }
     const t = (calcSt.trans || []).find(x => x.city === st.city && x.vehId);
     if (t) { const v = vehById[t.vehId]; if (v) lines.push({ supplier: v.supplier, type: 'TRANSPORT', res: 'vehicle', resource_id: t.vehId, from, to, quantity: 1, sell: t.price }); }
