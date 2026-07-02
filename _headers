@@ -1,0 +1,20 @@
+# Cloudflare — заголовки кэширования (Workers Static Assets / Pages).
+# Логика (лендинг и приложение) — всегда свежая; тяжёлая картинка — кэшируется надолго.
+
+/
+  Cache-Control: no-cache, no-store, must-revalidate
+
+/index.html
+  Cache-Control: no-cache, no-store, must-revalidate
+
+/app/
+  Cache-Control: no-cache, no-store, must-revalidate
+
+/app/index.html
+  Cache-Control: no-cache, no-store, must-revalidate
+
+/app/app.js
+  Cache-Control: no-cache, no-store, must-revalidate
+
+/2-1.jpg
+  Cache-Control: public, max-age=31536000, immutable
